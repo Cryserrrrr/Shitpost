@@ -24,9 +24,8 @@ const EXTRA_ORIGINS = process.env.ALLOWED_ORIGINS
 
 const isAllowedOrigin = (origin: string | undefined): boolean => {
   if (!origin) return true;
-  if (origin === "tauri://localhost" || origin === "https://tauri.localhost") return true;
+  if (origin.includes("tauri")) return true;
   if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) return true;
-  if (origin.startsWith("https://tauri.")) return true;
   console.log("[CORS] Blocked origin:", origin);
   return EXTRA_ORIGINS.includes(origin);
 };
