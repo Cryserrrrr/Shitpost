@@ -2,236 +2,216 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-import { ClientManager } from "./managers/ClientManager";
-import {
-  BroadcastMediaMessage,
-  MediaShowMessage,
-  ClientConnectionData,
-  OverlaySendMessage,
-} from "./types";
+import path from "path";
+import dotenv from "dotenv";
+import rateLimit from "express-rate-limit";
+import { AuthService } from "./services/AuthService";
+import { FriendsService } from "./services/FriendsService";
+import { prisma } from "./services/PrismaService";
+import authRoutes from "./routes/AuthRoutes";
+import friendsRoutes from "./routes/FriendsRoutes";
+import groupsRoutes from "./routes/GroupsRoutes";
+import { BroadcastMediaMessage } from "./types";
+
+dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 const app = express();
 const httpServer = createServer(app);
+
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",")
+  : ["http://localhost:1420", "http://127.0.0.1:1420", "tauri://localhost"];
+
+console.log("[CONFIG] Allowed origins:", ALLOWED_ORIGINS);
+
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
+    origin: ALLOWED_ORIGINS,
     methods: ["GET", "POST"],
+    credentials: true,
   },
-  maxHttpBufferSize: 20 * 1024 * 1024, // 20MB
+  allowEIO3: true,
+  maxHttpBufferSize: 100 * 1024 * 1024,
   pingTimeout: 60000,
   pingInterval: 25000,
 });
 
-const clientManager = new ClientManager();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json({ limit: "20mb" }));
-app.use(express.urlencoded({ extended: true, limit: "20mb" }));
-
-app.get("/clients", (req, res) => {
-  const clients = clientManager.getConnectedClients().map((client) => ({
-    machineId: client.machineId,
-    socketId: client.id,
-    connectedAt: client.connectedAt,
-    name: client.name,
-  }));
-
-  res.json({
-    count: clientManager.getClientCount(),
-    clients,
-  });
+// Rate limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later" },
 });
 
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    connectedClients: clientManager.getClientCount(),
-  });
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: "Too many auth attempts, please try again later" },
 });
 
-const validateRegistration = (data: ClientConnectionData): string | null => {
-  if (!data.machineId) {
-    return "Machine ID is required";
+app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
+
+// Routes with rate limiting
+app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/friends", apiLimiter, friendsRoutes);
+app.use("/api/groups", apiLimiter, groupsRoutes);
+
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok", uptime: process.uptime(), connections: userSockets.size });
+});
+
+// Track online users: userId -> socketId[]
+const userSockets = new Map<string, string[]>();
+
+const addUserSocket = (userId: string, socketId: string) => {
+  const sockets = userSockets.get(userId) || [];
+  if (!sockets.includes(socketId)) {
+    sockets.push(socketId);
+    userSockets.set(userId, sockets);
   }
-  return null;
 };
 
-const validateOverlaySend = (message: OverlaySendMessage): string | null => {
-  if (
-    !message.targets ||
-    !Array.isArray(message.targets) ||
-    message.targets.length === 0
-  ) {
-    return "Targets are required and must be an array";
+const removeUserSocket = (userId: string, socketId: string) => {
+  const sockets = userSockets.get(userId) || [];
+  const filtered = sockets.filter((id) => id !== socketId);
+  if (filtered.length > 0) {
+    userSockets.set(userId, filtered);
+  } else {
+    userSockets.delete(userId);
   }
-  if (!message.b64) {
-    return "Base64 image data is required";
-  }
-  if (
-    !message.timeoutMs ||
-    typeof message.timeoutMs !== "number" ||
-    message.timeoutMs <= 0
-  ) {
-    return "Timeout must be a positive number";
-  }
-  return null;
+  return filtered.length === 0; // true if user fully disconnected
 };
 
-const validateBroadcastMediaPayload = (payload: any): string | null => {
-  const { targetIds, mediaType, mediaBuffer, duration } = payload;
-
-  if (!targetIds || !Array.isArray(targetIds) || targetIds.length === 0) {
-    return "Target IDs are required and must be an array";
-  }
-  if (!mediaType || !["image", "video"].includes(mediaType)) {
-    return 'Media type must be "image" or "video"';
-  }
-  if (!mediaBuffer) {
-    return "Media buffer is required";
-  }
-  if (mediaBuffer.length > 20 * 1024 * 1024) {
-    // 20MB limit
-    return "Media buffer is too large (max 20MB)";
-  }
-  if (!duration || typeof duration !== "number" || duration <= 0) {
-    return "Duration must be a positive number";
-  }
-  return null;
-};
-
-const handleRegistration = (socket: any, data: ClientConnectionData) => {
-  const error = validateRegistration(data);
-  if (error) {
-    socket.emit("error", { message: error });
-    return;
+// Socket.io auth middleware
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) {
+    console.log("[AUTH] No token provided");
+    return next(new Error("Authentication error: No token provided"));
   }
 
-  const existingClient = clientManager.findClientBySocketId(socket.id);
-  if (existingClient) {
-    socket.emit("registered", { machineId: data.machineId });
-    return;
+  const decoded = AuthService.verifyToken(token);
+  if (!decoded?.userId) {
+    console.log("[AUTH] Invalid token:", token.substring(0, 20) + "...");
+    return next(new Error("Authentication error: Invalid token"));
   }
 
-  clientManager.addClient(socket, data.machineId, data.name);
-  socket.emit("registered", { machineId: data.machineId });
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { id: true, username: true },
+    });
+    if (!user) {
+      console.log(`[AUTH] User not found for id: ${decoded.userId}`);
+      return next(new Error("Authentication error: User not found"));
+    }
 
-  // Broadcast updated client list to all clients
-  clientManager.broadcastPresenceList();
-};
-
-const handleOverlaySend = (socket: any, message: OverlaySendMessage) => {
-  const error = validateOverlaySend(message);
-  if (error) {
-    socket.emit("error", { message: error });
-    return;
+    socket.data.userId = user.id;
+    socket.data.username = user.username;
+    next();
+  } catch (err) {
+    console.error("[AUTH] Database error:", err);
+    next(new Error("Authentication error: Database error"));
   }
+});
 
-  const { targets, b64, timeoutMs } = message;
-  clientManager.broadcastToTargets(targets, "overlay:image", {
-    b64,
-    timeoutMs,
+io.engine.on("connection_error", (err: any) => {
+  console.log("[SOCKET] Connection error:", err.message, err.code, err.context);
+});
+
+io.on("connection", async (socket) => {
+  const userId = socket.data.userId;
+  const username = socket.data.username;
+  console.log(`[+] ${username} (${userId}) connected`);
+
+  addUserSocket(userId, socket.id);
+  socket.join(`user:${userId}`);
+
+  // Mark user online
+  try {
+    await prisma.user.update({
+      where: { id: userId },
+      data: { status: "online" },
+    });
+  } catch {}
+
+  // Notify friends that this user is online
+  try {
+    const friends = await FriendsService.getFriends(userId);
+    for (const friend of friends) {
+      io.to(`user:${friend.id}`).emit("presence:update", {
+        userId,
+        username,
+        status: "online",
+      });
+    }
+
+    // Send list of currently online friends to this user
+    const onlineFriendIds = friends
+      .filter((f: any) => userSockets.has(f.id))
+      .map((f: any) => f.id);
+    socket.emit("presence:online_friends", onlineFriendIds);
+  } catch {}
+
+  // Handle media broadcast (memes!)
+  socket.on("broadcast_media", (message: BroadcastMediaMessage) => {
+    const { targetIds, mediaType, mediaBuffer, mimeType, duration, textOverlay, audioBuffer, audioMimeType } = message;
+
+    if (!targetIds || !Array.isArray(targetIds) || targetIds.length === 0) return;
+    if (!mediaBuffer || !mediaType) return;
+
+    const payload = {
+      mediaType,
+      mediaBuffer,
+      mimeType: mimeType || (mediaType === "image" ? "image/png" : "video/mp4"),
+      duration: Math.min(Math.max(duration || 5000, 1000), 30000),
+      textOverlay,
+      audioBuffer,
+      audioMimeType,
+      senderName: username,
+    };
+
+    console.log(`[>] ${username} sends ${mediaType} to ${targetIds.length} target(s)`);
+
+    for (const targetId of targetIds) {
+      io.to(`user:${targetId}`).emit("media:show", payload);
+    }
+
+    // Confirm to sender
+    socket.emit("media:sent", { targetIds, success: true });
   });
 
-  // Envoyer à tous les sockets connectés (pour l'overlay)
-  io.emit("overlay:image", {
-    b64,
-    timeoutMs,
-  });
+  // Handle disconnect
+  socket.on("disconnect", async () => {
+    console.log(`[-] ${username} (${userId}) disconnected`);
+    const fullyOffline = removeUserSocket(userId, socket.id);
 
-  socket.emit("overlay:sent", {
-    message: `Overlay image sent to ${targets.length} targets`,
-    targets,
-  });
-};
+    if (fullyOffline) {
+      try {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { status: "offline" },
+        });
 
-const handleBroadcastMedia = (socket: any, message: any) => {
-  console.log("Received broadcast_media:", {
-    targetIds: message.targetIds,
-    mediaType: message.mediaType,
-    bufferLength: message.mediaBuffer?.length || 0,
-    duration: message.duration,
-  });
-
-  const error = validateBroadcastMediaPayload(message);
-  if (error) {
-    console.log("Broadcast media validation error:", error);
-    socket.emit("error", { message: error });
-    return;
-  }
-
-  const { targetIds, mediaType, mediaBuffer, mimeType, duration, textOverlay } =
-    message;
-  const mediaShowMessage: MediaShowMessage = {
-    type: "media:show",
-    payload: { mediaType, mediaBuffer, mimeType, duration, textOverlay },
-  };
-
-  console.log("Broadcasting to targets:", targetIds);
-  console.log("Media show message payload:", {
-    mediaType,
-    mimeType,
-    bufferLength: mediaBuffer?.length || 0,
-    duration,
-    textOverlay,
-  });
-
-  // Envoyer aux clients enregistrés
-  clientManager.broadcastToTargets(
-    targetIds,
-    "media:show",
-    mediaShowMessage.payload
-  );
-
-  // Envoyer à tous les sockets connectés (pour l'overlay)
-  io.emit("media:show", mediaShowMessage.payload);
-
-  console.log("Broadcast completed");
-
-  socket.emit("broadcast_sent", {
-    message: `Media broadcast sent to ${targetIds.length} targets`,
-    targetIds,
-  });
-};
-
-io.on("connection", (socket) => {
-  console.log("New client connected:", socket.id);
-  socket.emit("presence:list", clientManager.getPresenceList());
-
-  socket.on("register", (data: ClientConnectionData) => {
-    console.log("Client registering:", socket.id, data);
-    handleRegistration(socket, data);
-  });
-
-  socket.on("overlay:send", (message: OverlaySendMessage) => {
-    console.log(
-      "Received overlay:send from",
-      socket.id,
-      "targets:",
-      message.targets?.length
-    );
-    handleOverlaySend(socket, message);
-  });
-
-  socket.on("broadcast_media", (message: any) => {
-    console.log(
-      "Received broadcast_media from",
-      socket.id,
-      "targets:",
-      message.targetIds?.length
-    );
-    handleBroadcastMedia(socket, message);
-  });
-
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-    clientManager.removeClient(socket.id);
-
-    // Broadcast updated client list to remaining clients
-    clientManager.broadcastPresenceList();
+        const friends = await FriendsService.getFriends(userId);
+        for (const friend of friends) {
+          io.to(`user:${friend.id}`).emit("presence:update", {
+            userId,
+            username,
+            status: "offline",
+          });
+        }
+      } catch {}
+    }
   });
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Shitpost Server running on port ${PORT}`);
 });

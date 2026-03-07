@@ -1,15 +1,28 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { io, Socket } from "socket.io-client";
-import { SHARED_CONFIG } from "./shared";
-import { SOCKET_CONFIG } from "./constants";
-import WelcomeScreen from "./components/WelcomeScreen";
-import PseudoConfig from "./components/PseudoConfig";
+import { useAuth } from "./contexts/AuthContext";
+import { useLang } from "./contexts/LangContext";
+import api from "./services/api";
+import LoginPage from "./pages/LoginPage";
+import RegisterPage from "./pages/RegisterPage";
+import { Icons } from "./components/Icons";
+import Titlebar from "./components/Titlebar";
 
-const TIMEOUT_LIMITS = {
-  min: 1000,
-  max: 30000,
-  step: 1000,
-} as const;
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:3000";
+
+const TIMEOUT_LIMITS = { min: 1000, maxImage: 10000, maxVideo: 30000, step: 500 } as const;
+
+const AVATAR_COLORS = [
+  "#ff6b9d", "#2de2e6", "#ffd700", "#ff8c42",
+  "#53d769", "#b854d4", "#ff4757", "#00d2d3",
+];
+
+function getAvatarColor(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
 
 interface MediaData {
   type: "image" | "video";
@@ -17,669 +30,1630 @@ interface MediaData {
   mimeType: string;
 }
 
-interface Client {
-  id: string;
+interface AudioData {
+  data: string;
+  mimeType: string;
   name: string;
 }
 
-function App() {
+const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  const { token, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-dark)" }}>
+        <div className="animate-float">
+          <Icons.Broadcast size={48} className="text-[var(--accent-cyan)]" />
+        </div>
+      </div>
+    );
+  }
+  if (!token) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+};
+
+function MainChat() {
+  const { user, token, logout } = useAuth();
+  const { t, lang, setLang } = useLang();
+  const navigate = useNavigate();
   const [socket, setSocket] = useState<Socket | null>(null);
-  const [clients, setClients] = useState<Client[]>([]);
-  const [selectedClients, setSelectedClients] = useState<string[]>([]);
+  const [friends, setFriends] = useState<any[]>([]);
+  const [groups, setGroups] = useState<any[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<any[]>([]);
+  const [onlineFriendIds, setOnlineFriendIds] = useState<string[]>([]);
+  const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
   const [mediaData, setMediaData] = useState<MediaData | null>(null);
-  const [textData, setTextData] = useState<{
-    topText: string;
-    bottomText: string;
-  }>({
-    topText: "",
-    bottomText: "",
-  });
-  const [previewWithText, setPreviewWithText] = useState<string | null>(null);
+  const [audioData, setAudioData] = useState<AudioData | null>(null);
+  const [textData, setTextData] = useState({ topText: "", bottomText: "" });
+  const [textSize, setTextSize] = useState(48);
+  const [textPosition, setTextPosition] = useState<"on" | "around">("on");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [timeoutMs, setTimeoutMs] = useState(5000);
-  const [showWelcome, setShowWelcome] = useState(() => {
-    return !localStorage.getItem("tauri-welcome-completed");
+  const [activeTab, setActiveTab] = useState<"media" | "social" | "settings">("media");
+  const [isDragging, setIsDragging] = useState(false);
+  const [memeVolume, setMemeVolume] = useState(() => {
+    const saved = localStorage.getItem("memeVolume");
+    return saved !== null ? Number(saved) : 100;
   });
-  const [showConfig, setShowConfig] = useState(false);
-  const [activeTab, setActiveTab] = useState<"media" | "settings">("media");
-
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sendStatus, setSendStatus] = useState<string | null>(null);
+  const [modal, setModal] = useState<{ type: "createGroup" | "addMember" | "manageGroup"; groupId?: string } | null>(null);
+  const [modalInput, setModalInput] = useState("");
+  const [autostart, setAutostart] = useState(false);
+  const [compressing, setCompressing] = useState(false);
+  const [compressProgress, setCompressProgress] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const topTextInputRef = useRef<HTMLInputElement>(null);
-  const bottomTextInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+  const [previewMuted, setPreviewMuted] = useState(true);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
 
-  const setupSocketListeners = useCallback((newSocket: Socket) => {
-    newSocket.on("connect", () => {
-      console.log("App connected to server");
-      newSocket.emit("register", {
-        machineId: SHARED_CONFIG.machineId,
-        name: SHARED_CONFIG.pseudo,
-      });
-    });
-
-    newSocket.on("presence:list", (clients: Client[]) => {
-      setClients(clients);
-    });
-
-    newSocket.on("presence:update", (client: Client) => {
-      setClients((prev) => {
-        const existing = prev.find((c) => c.id === client.id);
-        if (existing) {
-          return prev.map((c) => (c.id === client.id ? client : c));
-        } else {
-          return [...prev, client];
-        }
-      });
-    });
+  const fetchData = useCallback(async () => {
+    try {
+      const [friendsRes, groupsRes, pendingRes] = await Promise.all([
+        api.get("/friends"),
+        api.get("/groups"),
+        api.get("/friends/pending"),
+      ]);
+      setFriends(friendsRes.data);
+      setGroups(groupsRes.data);
+      setPendingRequests(pendingRes.data);
+    } catch (err) {
+      console.error("Failed to fetch data", err);
+    }
   }, []);
 
   useEffect(() => {
-    const newSocket = io(SHARED_CONFIG.serverUrl, SOCKET_CONFIG);
+    if (!token) return;
+
+    console.log("[SOCKET] Attempting connection to", SERVER_URL, "with token:", token?.substring(0, 20) + "...");
+    const newSocket = io(SERVER_URL, {
+      auth: { token },
+      transports: ["websocket", "polling"],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+    });
+
+    newSocket.on("connect", () => console.log("[SOCKET] Connected to server"));
+    let socketRefreshing = false;
+    newSocket.on("connect_error", async (err) => {
+      console.error("[SOCKET] Connection error:", err.message);
+      if (err.message.includes("Authentication error") && !socketRefreshing) {
+        socketRefreshing = true;
+        const rt = localStorage.getItem("refreshToken");
+        if (rt) {
+          try {
+            const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
+            const resp = await fetch(`${API_URL}/auth/refresh`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ refreshToken: rt }),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              localStorage.setItem("token", data.token);
+              localStorage.setItem("refreshToken", data.refreshToken);
+              newSocket.auth = { token: data.token };
+              newSocket.connect();
+            } else {
+              logout();
+            }
+          } catch {
+            logout();
+          }
+        } else {
+          logout();
+        }
+        socketRefreshing = false;
+      }
+    });
+
+    newSocket.on("presence:online_friends", (ids: string[]) => {
+      setOnlineFriendIds(ids);
+    });
+
+    newSocket.on("presence:update", (data: { userId: string; status: string }) => {
+      setOnlineFriendIds((prev) => {
+        if (data.status === "online") {
+          return prev.includes(data.userId) ? prev : [...prev, data.userId];
+        }
+        return prev.filter((id) => id !== data.userId);
+      });
+    });
+
+    newSocket.on("media:sent", () => {
+      setSendStatus(t("media.sent"));
+      setTimeout(() => setSendStatus(null), 2000);
+    });
+
     setSocket(newSocket);
-    setupSocketListeners(newSocket);
+    fetchData();
 
     return () => {
       newSocket.disconnect();
     };
-  }, [setupSocketListeners]);
+  }, [token, fetchData]);
 
-  const createMediaWithText = useCallback(
-    async (mediaData: any, textData: any) => {
-      if (!textData.topText && !textData.bottomText) {
-        return mediaData.data.split(",")[1];
+  // Load autostart status
+  useEffect(() => {
+    const invoke = (window as any).__TAURI__?.core?.invoke;
+    if (invoke) invoke("get_autostart").then((v: boolean) => setAutostart(v)).catch(() => {});
+  }, []);
+
+  // Preview with text overlay
+  const createPreview = useCallback(
+    async (media: MediaData, text: { topText: string; bottomText: string }) => {
+      if (media.type !== "image" || (!text.topText && !text.bottomText)) {
+        return media.data;
       }
 
-      if (mediaData.type === "image") {
-        return new Promise<string>((resolve) => {
-          const img = new Image();
-          img.onload = () => {
-            const canvas = document.createElement("canvas");
-            const ctx = canvas.getContext("2d");
-            if (!ctx) {
-              resolve(mediaData.data.split(",")[1]);
-              return;
-            }
+      return new Promise<string>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          const ctx = canvas.getContext("2d");
+          if (!ctx) { resolve(media.data); return; }
 
-            canvas.width = img.width;
-            canvas.height = img.height;
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
 
-            ctx.drawImage(img, 0, 0);
+          const fontSize = Math.max(Math.round(textSize * (img.width / 800)), 16);
+          ctx.font = `bold ${fontSize}px Impact, Charcoal, sans-serif`;
+          ctx.textAlign = "center";
+          ctx.strokeStyle = "#000000";
+          ctx.lineWidth = fontSize / 10;
+          ctx.fillStyle = "#ffffff";
 
-            if (textData.topText || textData.bottomText) {
-              ctx.font = "bold 32px Impact, Charcoal, sans-serif";
-              ctx.textAlign = "center";
-              ctx.strokeStyle = "#000000";
-              ctx.lineWidth = 1;
-              ctx.fillStyle = "#ffffff";
+          if (text.topText) {
+            const t = text.topText.toUpperCase();
+            ctx.strokeText(t, canvas.width / 2, fontSize + 10);
+            ctx.fillText(t, canvas.width / 2, fontSize + 10);
+          }
+          if (text.bottomText) {
+            const t = text.bottomText.toUpperCase();
+            ctx.strokeText(t, canvas.width / 2, canvas.height - 20);
+            ctx.fillText(t, canvas.width / 2, canvas.height - 20);
+          }
 
-              if (textData.topText) {
-                const topText = textData.topText.toUpperCase();
-                const x = canvas.width / 2;
-                const y = 40;
-
-                ctx.strokeText(topText, x, y);
-                ctx.fillText(topText, x, y);
-              }
-
-              if (textData.bottomText) {
-                const bottomText = textData.bottomText.toUpperCase();
-                const x = canvas.width / 2;
-                const y = canvas.height - 30;
-
-                ctx.strokeText(bottomText, x, y);
-                ctx.fillText(bottomText, x, y);
-              }
-            }
-
-            const dataUrl = canvas.toDataURL("image/png", 1.0);
-            resolve(dataUrl.split(",")[1]);
-          };
-          img.src = mediaData.data;
-        });
-      } else {
-        // Pour les vidéos, on ne peut pas intégrer le texte directement
-        // On retourne la vidéo originale et on enverra le texte séparément
-        return mediaData.data.split(",")[1];
-      }
+          resolve(canvas.toDataURL("image/png", 1.0));
+        };
+        img.src = media.data;
+      });
     },
-    []
+    [textSize]
   );
 
   useEffect(() => {
-    const updatePreview = async () => {
-      if (
-        mediaData &&
-        mediaData.type === "image" &&
-        (textData.topText || textData.bottomText)
-      ) {
-        const previewDataUrl = await createMediaWithText(mediaData, textData);
-        setPreviewWithText(`data:image/png;base64,${previewDataUrl}`);
-      } else if (mediaData) {
-        setPreviewWithText(mediaData.data);
-      } else {
-        setPreviewWithText(null);
-      }
-    };
+    if (!mediaData) { setPreviewUrl(null); return; }
+    if (mediaData.type === "image" && textPosition === "on") {
+      createPreview(mediaData, textData).then(setPreviewUrl);
+    } else {
+      setPreviewUrl(mediaData.data);
+    }
+  }, [mediaData, textData, textPosition, textSize, createPreview]);
 
-    updatePreview();
-  }, [mediaData, textData, createMediaWithText]);
+  // Sync preview video volume with settings
+  useEffect(() => {
+    if (previewVideoRef.current) previewVideoRef.current.volume = memeVolume / 100;
+  }, [memeVolume]);
 
-  const handleWelcomeComplete = useCallback(() => {
-    localStorage.setItem("tauri-welcome-completed", "true");
-    setShowWelcome(false);
+  // Clamp duration when switching media type
+  useEffect(() => {
+    const max = mediaData?.type === "video" ? TIMEOUT_LIMITS.maxVideo : TIMEOUT_LIMITS.maxImage;
+    setTimeoutMs((prev) => Math.min(prev, max));
+  }, [mediaData?.type]);
+
+  const loadMediaFile = useCallback((file: File, dataUrl: string) => {
+    const isVideo = file.type.startsWith("video/");
+    setMediaData({ type: isVideo ? "video" : "image", data: dataUrl, mimeType: file.type });
+    if (isVideo) {
+      const v = document.createElement("video");
+      v.src = dataUrl;
+      v.onloadedmetadata = () => {
+        const dur = v.duration;
+        setVideoDuration(dur);
+        setTrimStart(0);
+        const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
+        setTrimEnd(maxTrim);
+        setTimeoutMs(Math.round(maxTrim * 1000));
+      };
+    } else {
+      setVideoDuration(0);
+      setTrimStart(0);
+      setTrimEnd(0);
+    }
   }, []);
 
-  const handleFileUpload = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      if (!file) return;
+  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (re) => loadMediaFile(file, re.target?.result as string);
+    reader.readAsDataURL(file);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [loadMediaFile]);
 
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const result = e.target?.result as string;
-        setMediaData({
-          type: file.type.startsWith("image/") ? "image" : "video",
-          data: result,
-          mimeType: file.type,
-        });
-      };
-      reader.readAsDataURL(file);
+  const handleAudioUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (re) => {
+      const result = re.target?.result as string;
+      setAudioData({
+        data: result.split(",")[1],
+        mimeType: file.type,
+        name: file.name,
+      });
+    };
+    reader.readAsDataURL(file);
+    if (audioInputRef.current) audioInputRef.current.value = "";
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setIsDragging(false);
+      const file = e.dataTransfer.files[0];
+      if (!file) return;
+      if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
+        const reader = new FileReader();
+        reader.onload = (re) => loadMediaFile(file, re.target?.result as string);
+        reader.readAsDataURL(file);
+      }
     },
-    []
+    [loadMediaFile]
   );
 
+  const compressVideo = useCallback(async (dataUrl: string, start: number, end: number): Promise<string> => {
+    const MAX_WIDTH = 1280;
+    const MAX_HEIGHT = 720;
+
+    return new Promise((resolve, reject) => {
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.src = dataUrl;
+
+      video.onloadedmetadata = () => {
+        let w = video.videoWidth;
+        let h = video.videoHeight;
+        if (w > MAX_WIDTH || h > MAX_HEIGHT) {
+          const ratio = Math.min(MAX_WIDTH / w, MAX_HEIGHT / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        w = w % 2 === 0 ? w : w - 1;
+        h = h % 2 === 0 ? h : h - 1;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d")!;
+
+        const stream = canvas.captureStream(30);
+        try {
+          const audioCtx = new AudioContext();
+          const source = audioCtx.createMediaElementSource(video);
+          const dest = audioCtx.createMediaStreamDestination();
+          source.connect(dest);
+          source.connect(audioCtx.destination);
+          dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
+        } catch {
+          // No audio - continue without
+        }
+
+        const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+          ? "video/webm;codecs=vp9"
+          : "video/webm";
+        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 2_000_000 });
+
+        const chunks: Blob[] = [];
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+
+        recorder.onstop = () => {
+          const blob = new Blob(chunks, { type: "video/webm" });
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error("Failed to read compressed video"));
+          reader.readAsDataURL(blob);
+        };
+
+        recorder.onerror = () => reject(new Error("MediaRecorder error"));
+
+        const clipDuration = end - start;
+        let lastProgress = 0;
+
+        const drawFrame = () => {
+          if (video.paused || video.ended || video.currentTime >= end) {
+            ctx.drawImage(video, 0, 0, w, h);
+            video.pause();
+            setTimeout(() => recorder.stop(), 100);
+            return;
+          }
+          ctx.drawImage(video, 0, 0, w, h);
+          const progress = Math.round(((video.currentTime - start) / clipDuration) * 100);
+          if (progress !== lastProgress) {
+            lastProgress = progress;
+            setCompressProgress(Math.min(progress, 100));
+          }
+          requestAnimationFrame(drawFrame);
+        };
+
+        // Seek to trim start, then play
+        video.currentTime = start;
+        video.onseeked = () => {
+          recorder.start();
+          video.play().then(drawFrame).catch(reject);
+          video.onseeked = null;
+        };
+      };
+
+      video.onerror = () => reject(new Error("Video load error"));
+    });
+  }, []);
+
   const handleSend = useCallback(async () => {
-    if (!socket?.connected || selectedClients.length === 0) return;
+    if (!socket?.connected || selectedTargets.length === 0 || !mediaData) return;
 
-    if (mediaData) {
-      const mediaBuffer = await createMediaWithText(mediaData, textData);
-      const payload = {
-        targetIds: selectedClients,
-        mediaType: mediaData.type,
-        mediaBuffer,
-        mimeType: mediaData.type === "image" ? "image/png" : mediaData.mimeType,
-        duration: timeoutMs,
-        textOverlay:
-          textData.topText || textData.bottomText
-            ? {
-                topText: textData.topText,
-                bottomText: textData.bottomText,
-              }
-            : undefined,
-      };
+    const hasText = textData.topText || textData.bottomText;
+    let mediaBuffer: string;
+    let mimeType = mediaData.mimeType;
 
-      socket.emit("broadcast_media", payload);
-    } else if (textData.topText || textData.bottomText) {
-      const payload = {
-        targetIds: selectedClients,
-        mediaType: "text",
-        text: textData.topText || textData.bottomText,
-        position: "top",
-        fontSize: 24,
-        color: "#ffffff",
-        duration: timeoutMs,
-      };
-
-      socket.emit("broadcast_media", payload);
+    if (mediaData.type === "image" && hasText && textPosition === "on") {
+      const rendered = await createPreview(mediaData, textData);
+      mediaBuffer = rendered.split(",")[1];
+      mimeType = "image/png";
+    } else if (mediaData.type === "video") {
+      // Compress video before sending
+      setCompressing(true);
+      setCompressProgress(0);
+      try {
+        const compressed = await compressVideo(mediaData.data, trimStart, trimEnd);
+        mediaBuffer = compressed.split(",")[1];
+        mimeType = "video/webm";
+      } catch (err) {
+        console.error("Video compression failed:", err);
+        setSendStatus(t("media.compress_error"));
+        setCompressing(false);
+        return;
+      }
+      setCompressing(false);
+    } else {
+      mediaBuffer = mediaData.data.split(",")[1];
     }
-  }, [
-    socket,
-    selectedClients,
-    mediaData,
-    textData,
-    timeoutMs,
-    createMediaWithText,
-  ]);
 
-  const handleClearMedia = useCallback(() => {
-    setMediaData(null);
-  }, []);
+    socket.emit("broadcast_media", {
+      targetIds: selectedTargets,
+      mediaType: mediaData.type,
+      mediaBuffer,
+      mimeType,
+      duration: timeoutMs,
+      textOverlay: hasText && (textPosition === "around" || mediaData.type === "video") ? { ...textData, fontSize: textSize, position: textPosition } : undefined,
+      audioBuffer: mediaData.type === "image" ? audioData?.data : undefined,
+      audioMimeType: mediaData.type === "image" ? audioData?.mimeType : undefined,
+    });
+  }, [socket, selectedTargets, mediaData, textData, timeoutMs, audioData, createPreview, compressVideo, trimStart, trimEnd]);
 
-  const handleClientToggle = useCallback((clientId: string) => {
-    setSelectedClients((prev) =>
-      prev.includes(clientId)
-        ? prev.filter((id) => id !== clientId)
-        : [...prev, clientId]
+  const handleTargetToggle = (id: string) => {
+    setSelectedTargets((prev) =>
+      prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]
     );
-  }, []);
+  };
 
-  const handleSelectAll = useCallback(() => {
-    setSelectedClients(clients.map((c) => c.id));
-  }, [clients]);
+  const handleSelectGroup = (groupId: string) => {
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) return;
+    const memberIds = group.members.map((m: any) => m.userId).filter((id: string) => id !== user?.id);
+    const allSelected = memberIds.every((id: string) => selectedTargets.includes(id));
+    if (allSelected) {
+      setSelectedTargets((prev) => prev.filter((t) => !memberIds.includes(t)));
+    } else {
+      setSelectedTargets((prev) => Array.from(new Set([...prev, ...memberIds])));
+    }
+  };
 
-  const handleSelectNone = useCallback(() => {
-    setSelectedClients([]);
-  }, []);
+  const handleSendFriendRequest = async () => {
+    if (!searchQuery.trim()) return;
+    try {
+      await api.post("/friends/request", { username: searchQuery });
+      setSearchQuery("");
+      fetchData();
+      setSendStatus(t("friends.request_sent"));
+      setTimeout(() => setSendStatus(null), 2000);
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
 
-  const handleClearMachineId = useCallback(() => {
-    localStorage.removeItem("tauri-machine-id");
-    localStorage.removeItem("tauri-welcome-completed");
-    window.location.reload();
-  }, []);
+  const handleAcceptFriend = async (id: string) => {
+    try { await api.post(`/friends/accept/${id}`); fetchData(); } catch {}
+  };
 
-  if (showWelcome) {
-    return <WelcomeScreen onComplete={handleWelcomeComplete} />;
-  }
+  const handleDeclineFriend = async (id: string) => {
+    try { await api.post(`/friends/decline/${id}`); fetchData(); } catch {}
+  };
 
-  if (showConfig) {
-    return <PseudoConfig onClose={() => setShowConfig(false)} />;
-  }
+  const handleCreateGroup = () => {
+    setModalInput("");
+    setModal({ type: "createGroup" });
+  };
+
+  const handleAddMember = (groupId: string) => {
+    setModalInput("");
+    setModal({ type: "addMember", groupId });
+  };
+
+  const handleManageGroup = (groupId: string) => {
+    setModal({ type: "manageGroup", groupId });
+  };
+
+  const handleModalSubmit = async () => {
+    if (!modalInput.trim()) return;
+    try {
+      if (modal?.type === "createGroup") {
+        await api.post("/groups", { name: modalInput });
+      } else if (modal?.type === "addMember" && modal.groupId) {
+        await api.post(`/groups/${modal.groupId}/members`, { username: modalInput });
+      }
+      fetchData();
+      setModal(null);
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const handleKickMember = async (groupId: string, userId: string) => {
+    try {
+      await api.delete(`/groups/${groupId}/members/${userId}`);
+      fetchData();
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const handleSetRole = async (groupId: string, userId: string, role: "admin" | "member") => {
+    try {
+      await api.patch(`/groups/${groupId}/members/${userId}/role`, { role });
+      fetchData();
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const handleRenameGroup = async (groupId: string, newName: string) => {
+    try {
+      await api.patch(`/groups/${groupId}`, { name: newName });
+      fetchData();
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const handleDeleteGroup = async (groupId: string) => {
+    try {
+      await api.delete(`/groups/${groupId}`);
+      fetchData();
+      setModal(null);
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const handleLeaveGroup = async (groupId: string) => {
+    try {
+      await api.post(`/groups/${groupId}/leave`);
+      fetchData();
+      setModal(null);
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const getMyRole = (group: any) => {
+    return group.members?.find((m: any) => m.userId === user?.id)?.role || "member";
+  };
+
+  const onlineCount = friends.filter((f) => onlineFriendIds.includes(f.id)).length;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500">
-      <header className="bg-white/10 backdrop-blur-md border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center py-4">
-            <h1 className="text-2xl font-bold text-white">Live Chat Studio</h1>
-            <div className="flex items-center space-x-4">
-              <span
-                className={`px-3 py-1 rounded-full text-sm font-medium ${
-                  socket?.connected
-                    ? "bg-green-500/20 text-green-400 border border-green-500/30"
-                    : "bg-red-500/20 text-red-400 border border-red-500/30"
-                }`}
-              >
-                {socket?.connected ? "Connecté" : "Déconnecté"}
-              </span>
-              <span className="px-3 py-1 rounded-full text-sm font-medium bg-white/10 text-white">
-                {SHARED_CONFIG.pseudo}
-              </span>
-            </div>
+    <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-dark)" }}>
+      <Titlebar>
+        {/* Connection status */}
+        <span
+          className="inline-block w-2 h-2 rounded-full"
+          style={{ background: socket?.connected ? "var(--accent-green)" : "var(--accent-red)" }}
+          title={socket?.connected ? t("general.connected") : t("friends.offline")}
+        />
+        {/* User */}
+        <div className="flex items-center gap-1.5">
+          <div
+            className="cartoon-avatar"
+            style={{ background: getAvatarColor(user?.username || ""), width: 24, height: 24, fontSize: 10 }}
+          >
+            {user?.username?.[0]?.toUpperCase()}
           </div>
+          <span className="font-bold text-xs" style={{ color: "var(--text-white)" }}>
+            {user?.username}
+          </span>
         </div>
-      </header>
+      </Titlebar>
 
-      <nav className="bg-white/10 backdrop-blur-md border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex space-x-1">
-            <button
-              className={`px-6 py-4 text-sm font-medium transition-all duration-300 border-b-2 ${
-                activeTab === "media"
-                  ? "text-white border-white bg-white/10"
-                  : "text-white/70 border-transparent hover:text-white hover:bg-white/5"
-              }`}
-              onClick={() => setActiveTab("media")}
-            >
-              📺 Média
-            </button>
-            <button
-              className={`px-6 py-4 text-sm font-medium transition-all duration-300 border-b-2 ${
-                activeTab === "settings"
-                  ? "text-white border-white bg-white/10"
-                  : "text-white/70 border-transparent hover:text-white hover:bg-white/5"
-              }`}
-              onClick={() => setActiveTab("settings")}
-            >
-              ⚙️ Paramètres
-            </button>
-          </div>
-        </div>
+      {/* Tabs */}
+      <nav className="px-6 py-3 flex gap-2" style={{ background: "var(--bg-dark)" }}>
+        {[
+          { id: "media", label: "Shitpost", icon: Icons.Media, color: "var(--accent-pink)" },
+          { id: "social", label: t("sidebar.friends"), icon: Icons.Users, color: "var(--accent-cyan)" },
+          { id: "settings", label: t("sidebar.settings"), icon: Icons.Settings, color: "var(--accent-yellow)" },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id as any)}
+            className="cartoon-tab flex items-center gap-2"
+            style={
+              activeTab === tab.id
+                ? { background: tab.color, color: "#000", borderColor: "#000", boxShadow: "var(--shadow-cartoon-sm)" }
+                : {}
+            }
+          >
+            <tab.icon size={18} />
+            {tab.label}
+          </button>
+        ))}
       </nav>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {activeTab === "media" && (
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-            <div className="lg:col-span-2">
-              <div className="bg-white rounded-xl shadow-2xl p-6">
-                <div className="space-y-6">
-                  <div>
-                    <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                      Média
-                    </h3>
-                    <div className="space-y-4">
-                      <div className="flex space-x-2">
+      {/* Toast */}
+      {sendStatus && (
+        <div
+          className="fixed top-4 right-4 z-50 cartoon-badge animate-bounce-in"
+          style={{ background: "var(--accent-green)", color: "#000", fontSize: 14, padding: "8px 16px" }}
+        >
+          {sendStatus}
+        </div>
+      )}
+
+      {/* Modal */}
+      {modal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
+          onClick={() => setModal(null)}
+        >
+          <div
+            className="cartoon-card p-6 w-full max-w-md animate-bounce-in"
+            style={{ maxHeight: "85vh", display: "flex", flexDirection: "column" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {modal.type === "createGroup" && (
+              <>
+                <h2 className="font-cartoon text-lg mb-4" style={{ color: "var(--accent-purple)" }}>
+                  {t("groups.create")}
+                </h2>
+                <label className="text-xs font-bold mb-1 block" style={{ color: "var(--text-muted)" }}>
+                  {t("groups.name").toUpperCase()}
+                </label>
+                <input
+                  type="text"
+                  value={modalInput}
+                  onChange={(e) => setModalInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleModalSubmit()}
+                  className="cartoon-input w-full mb-4"
+                  placeholder="Ex: The boys"
+                  autoFocus
+                />
+                <div className="flex gap-3">
+                  <button onClick={() => setModal(null)} className="cartoon-btn flex-1 py-2.5" style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}>
+                    {t("general.cancel")}
+                  </button>
+                  <button onClick={handleModalSubmit} disabled={!modalInput.trim()} className="cartoon-btn flex-1 py-2.5"
+                    style={{ background: "var(--accent-purple)", color: "#fff", opacity: modalInput.trim() ? 1 : 0.5 }}>
+                    {t("general.confirm")}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {modal.type === "addMember" && (
+              <>
+                <h2 className="font-cartoon text-lg mb-4" style={{ color: "var(--accent-cyan)" }}>
+                  {t("groups.add_member")}
+                </h2>
+                {(() => {
+                  const group = groups.find((g) => g.id === modal.groupId);
+                  const memberIds = group?.members?.map((m: any) => m.userId) || [];
+                  const availableFriends = friends.filter((f) => !memberIds.includes(f.id));
+                  return availableFriends.length > 0 ? (
+                    <div className="space-y-1 max-h-64 overflow-y-auto">
+                      {availableFriends.map((friend) => (
+                        <div
+                          key={friend.id}
+                          onClick={async () => {
+                            try {
+                              await api.post(`/groups/${modal.groupId}/members`, { username: friend.username });
+                              fetchData();
+                              setModal(null);
+                            } catch (err: any) {
+                              setSendStatus(err.response?.data?.message || t("general.error"));
+                              setTimeout(() => setSendStatus(null), 3000);
+                            }
+                          }}
+                          className="friend-item cursor-pointer"
+                        >
+                          <div className="cartoon-avatar" style={{ background: getAvatarColor(friend.username), width: 32, height: 32, fontSize: 12 }}>
+                            {friend.username[0].toUpperCase()}
+                          </div>
+                          <span className="flex-1 text-sm font-bold">{friend.username}</span>
+                          <span className="text-xs font-bold" style={{ color: "var(--accent-cyan)" }}>+ {t("groups.add_member")}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-center py-4" style={{ color: "var(--text-muted)" }}>
+                      {t("friends.all_in_group")}
+                    </p>
+                  );
+                })()}
+                <button onClick={() => setModal(null)} className="cartoon-btn w-full py-2.5 mt-4" style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}>
+                  {t("general.close")}
+                </button>
+              </>
+            )}
+
+            {modal.type === "manageGroup" && (() => {
+              const group = groups.find((g) => g.id === modal.groupId);
+              if (!group) return null;
+              const myRole = getMyRole(group);
+              const isOwner = myRole === "owner";
+              const isAdmin = myRole === "admin";
+              const canManage = isOwner || isAdmin;
+
+              return (
+                <>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-cartoon text-lg" style={{ color: "var(--accent-purple)" }}>
+                      {t("groups.manage")}
+                    </h2>
+                    <span className="text-xs px-2 py-0.5 rounded font-bold" style={{
+                      background: isOwner ? "var(--accent-yellow)" : isAdmin ? "var(--accent-cyan)" : "var(--bg-card)",
+                      color: isOwner || isAdmin ? "#000" : "var(--text-gray)",
+                    }}>
+                      {isOwner ? t("groups.owner") : isAdmin ? t("groups.admin") : t("groups.member")}
+                    </span>
+                  </div>
+
+                  {/* Rename */}
+                  {canManage && (
+                    <div className="mb-4">
+                      <label className="text-xs font-bold mb-1 block" style={{ color: "var(--text-muted)" }}>{t("groups.name").toUpperCase()}</label>
+                      <div className="flex gap-2">
                         <input
-                          ref={fileInputRef}
-                          type="file"
-                          accept="image/*,video/*"
-                          onChange={handleFileUpload}
-                          className="hidden"
+                          type="text"
+                          defaultValue={group.name}
+                          id="rename-group-input"
+                          className="cartoon-input flex-1 text-sm"
                         />
                         <button
-                          onClick={() => fileInputRef.current?.click()}
-                          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                          onClick={() => {
+                            const input = document.getElementById("rename-group-input") as HTMLInputElement;
+                            if (input?.value.trim() && input.value !== group.name) {
+                              handleRenameGroup(group.id, input.value.trim());
+                            }
+                          }}
+                          className="cartoon-btn px-3 py-1 text-xs"
+                          style={{ background: "var(--accent-cyan)", color: "#000" }}
                         >
-                          📁 Choisir média
+                          {t("groups.rename")}
                         </button>
-                        {mediaData && (
-                          <button
-                            onClick={handleClearMedia}
-                            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-                          >
-                            🗑️ Supprimer
-                          </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Members list */}
+                  <label className="text-xs font-bold mb-2 block" style={{ color: "var(--text-muted)" }}>
+                    {t("groups.members").toUpperCase()} ({group.members?.length || 0})
+                  </label>
+                  <div className="space-y-1 overflow-y-auto mb-4" style={{ maxHeight: 280 }}>
+                    {group.members?.sort((a: any, b: any) => {
+                      const order: Record<string, number> = { owner: 0, admin: 1, member: 2 };
+                      return (order[a.role] ?? 2) - (order[b.role] ?? 2);
+                    }).map((m: any) => {
+                      const isMe = m.userId === user?.id;
+                      const memberRole = m.role;
+                      return (
+                        <div key={m.userId} className="flex items-center gap-2 p-2 rounded-lg" style={{ background: "var(--bg-input)" }}>
+                          <div className="cartoon-avatar" style={{ background: getAvatarColor(m.user?.username || ""), width: 30, height: 30, fontSize: 11 }}>
+                            {m.user?.username?.[0]?.toUpperCase()}
+                          </div>
+                          <span className="flex-1 text-sm font-bold">{m.user?.username} {isMe ? `(${t("general.you")})` : ""}</span>
+                          <span className="text-xs px-1.5 py-0.5 rounded font-bold" style={{
+                            background: memberRole === "owner" ? "var(--accent-yellow)" : memberRole === "admin" ? "var(--accent-cyan)" : "var(--bg-card)",
+                            color: memberRole === "owner" || memberRole === "admin" ? "#000" : "var(--text-muted)",
+                            fontSize: 10,
+                          }}>
+                            {memberRole === "owner" ? t("groups.owner") : memberRole === "admin" ? t("groups.admin") : t("groups.member")}
+                          </span>
+
+                          {/* Role actions */}
+                          {!isMe && memberRole !== "owner" && (
+                            <div className="flex gap-1">
+                              {isOwner && memberRole === "member" && (
+                                <button
+                                  onClick={() => handleSetRole(group.id, m.userId, "admin")}
+                                  className="text-xs px-1.5 py-0.5 rounded font-bold"
+                                  style={{ background: "var(--accent-cyan)", color: "#000", fontSize: 10 }}
+                                  title={t("groups.promote_admin")}
+                                >
+                                  {t("groups.admin")}
+                                </button>
+                              )}
+                              {isOwner && memberRole === "admin" && (
+                                <button
+                                  onClick={() => handleSetRole(group.id, m.userId, "member")}
+                                  className="text-xs px-1.5 py-0.5 rounded font-bold"
+                                  style={{ background: "var(--bg-card)", color: "var(--text-gray)", fontSize: 10 }}
+                                  title={t("groups.demote_member")}
+                                >
+                                  {t("groups.demote_member")}
+                                </button>
+                              )}
+                              {((isOwner) || (isAdmin && memberRole === "member")) && (
+                                <button
+                                  onClick={() => handleKickMember(group.id, m.userId)}
+                                  className="text-xs px-1.5 py-0.5 rounded font-bold"
+                                  style={{ background: "var(--accent-red)", color: "#fff", fontSize: 10 }}
+                                  title={t("groups.kick")}
+                                >
+                                  {t("groups.kick")}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex gap-2">
+                    {!isOwner && (
+                      <button
+                        onClick={() => handleLeaveGroup(group.id)}
+                        className="cartoon-btn flex-1 py-2 text-xs"
+                        style={{ background: "var(--accent-orange)", color: "#fff" }}
+                      >
+                        {t("groups.leave")}
+                      </button>
+                    )}
+                    {isOwner && (
+                      <button
+                        onClick={() => {
+                          if (confirm(t("groups.delete") + "?")) {
+                            handleDeleteGroup(group.id);
+                          }
+                        }}
+                        className="cartoon-btn flex-1 py-2 text-xs"
+                        style={{ background: "var(--accent-red)", color: "#fff" }}
+                      >
+                        {t("groups.delete")}
+                      </button>
+                    )}
+                    <button onClick={() => setModal(null)} className="cartoon-btn flex-1 py-2 text-xs" style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}>
+                      {t("general.close")}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Main Content - no page scroll, everything fits */}
+      <main className="flex-1 flex overflow-hidden p-4 pt-0 gap-4">
+        {/* Left - Content area */}
+        <div className="flex-1 flex flex-col overflow-hidden gap-4">
+          {activeTab === "media" && (
+            <div className="cartoon-card p-4 flex-1 flex flex-row gap-4 overflow-hidden min-h-0">
+              {/* Left: Preview */}
+              <div
+                className={`flex flex-col items-center justify-center rounded-2xl overflow-hidden min-h-0 min-w-0 ${isDragging ? "dragging" : ""}`}
+                style={{ flex: "1 1 50%", background: "var(--bg-input)", border: "2px dashed var(--border-card)" }}
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+              >
+                {previewUrl ? (
+                  <div className="relative w-full" style={{ flex: "1 1 0%", minHeight: 0 }}>
+                    {mediaData?.type === "image" ? (
+                      <img src={previewUrl} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />
+                    ) : (
+                      <video
+                        ref={(el) => {
+                          (previewVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+                          if (el) el.volume = memeVolume / 100;
+                        }}
+                        src={previewUrl}
+                        autoPlay
+                        muted={previewMuted}
+                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
+                        onLoadedMetadata={() => {
+                          if (previewVideoRef.current && trimStart > 0) {
+                            previewVideoRef.current.currentTime = trimStart;
+                          }
+                        }}
+                        onTimeUpdate={() => {
+                          const v = previewVideoRef.current;
+                          if (v && trimEnd > 0 && v.currentTime >= trimEnd) {
+                            v.currentTime = trimStart;
+                            v.play();
+                          }
+                        }}
+                      />
+                    )}
+                    {/* Text overlay preview (for videos, or images in "around" mode) */}
+                    {(mediaData?.type === "video" || textPosition === "around") && (textData.topText || textData.bottomText) && (
+                      <>
+                        {textData.topText && (
+                          <div style={{
+                            position: "absolute", top: 8, left: 0, right: 0, textAlign: "center", zIndex: 1,
+                            fontSize: textSize * 0.45, fontWeight: 900, fontFamily: "'Impact', 'Charcoal', sans-serif",
+                            color: "#fff", letterSpacing: 1,
+                            textShadow: "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000",
+                            pointerEvents: "none",
+                          }}>
+                            {textData.topText.toUpperCase()}
+                          </div>
                         )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div>
-                    <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                      Aperçu final
-                    </h3>
-                    <div
-                      className="relative bg-gray-900 rounded-lg overflow-hidden"
-                      style={{ aspectRatio: "16/9" }}
+                        {textData.bottomText && (
+                          <div style={{
+                            position: "absolute", bottom: 8, left: 0, right: 0, textAlign: "center", zIndex: 1,
+                            fontSize: textSize * 0.45, fontWeight: 900, fontFamily: "'Impact', 'Charcoal', sans-serif",
+                            color: "#fff", letterSpacing: 1,
+                            textShadow: "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000",
+                            pointerEvents: "none",
+                          }}>
+                            {textData.bottomText.toUpperCase()}
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {mediaData?.type === "video" && (
+                      <button
+                        onClick={() => setPreviewMuted((m) => !m)}
+                        className="absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center"
+                        style={{ background: "rgba(0,0,0,0.7)", border: "2px solid rgba(255,255,255,0.3)", zIndex: 2, pointerEvents: "auto", cursor: "pointer" }}
+                      >
+                        {previewMuted ? <Icons.Muted size={14} className="text-white" /> : <Icons.Volume size={14} className="text-white" />}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setMediaData(null); setAudioData(null); setTextData({ topText: "", bottomText: "" }); setPreviewMuted(true); }}
+                      className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center"
+                      style={{ background: "var(--accent-red)", border: "2px solid #000", boxShadow: "var(--shadow-cartoon-sm)", zIndex: 2 }}
                     >
-                      {previewWithText ? (
-                        <>
-                          {mediaData?.type === "image" && (
-                            <img
-                              src={previewWithText}
-                              alt="Preview"
-                              className="w-full h-full object-cover"
-                            />
-                          )}
-                          {mediaData?.type === "video" && (
-                            <div className="relative w-full h-full">
-                              <video
-                                src={previewWithText}
-                                className="w-full h-full object-cover"
-                                muted
-                                loop
-                                autoPlay
-                              />
-                              {textData.topText && (
-                                <div
-                                  className="absolute left-1/2 transform -translate-x-1/2 text-center px-4 py-2 max-w-[90%]"
-                                  style={{
-                                    top: "20px",
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      fontSize: "24px",
-                                      color: "#ffffff",
-                                      fontWeight: "bold",
-                                      fontFamily:
-                                        "Impact, Charcoal, sans-serif",
-                                      textShadow: `
-                                         -3px -3px 0 #000,
-                                         3px -3px 0 #000,
-                                         -3px 3px 0 #000,
-                                         3px 3px 0 #000,
-                                         0px -3px 0 #000,
-                                         0px 3px 0 #000,
-                                         -3px 0px 0 #000,
-                                         3px 0px 0 #000
-                                       `,
-                                    }}
-                                  >
-                                    {textData.topText.toUpperCase()}
-                                  </div>
-                                </div>
-                              )}
-                              {textData.bottomText && (
-                                <div
-                                  className="absolute left-1/2 transform -translate-x-1/2 text-center px-4 py-2 max-w-[90%]"
-                                  style={{
-                                    bottom: "20px",
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      fontSize: "24px",
-                                      color: "#ffffff",
-                                      fontWeight: "bold",
-                                      fontFamily:
-                                        "Impact, Charcoal, sans-serif",
-                                      textShadow: `
-                                         -3px -3px 0 #000,
-                                         3px -3px 0 #000,
-                                         -3px 3px 0 #000,
-                                         3px 3px 0 #000,
-                                         0px -3px 0 #000,
-                                         0px 3px 0 #000,
-                                         -3px 0px 0 #000,
-                                         3px 0px 0 #000
-                                       `,
-                                    }}
-                                  >
-                                    {textData.bottomText.toUpperCase()}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </>
-                      ) : textData.topText || textData.bottomText ? (
-                        <div className="w-full h-full flex items-center justify-center bg-gray-800">
-                          <div className="text-center px-4 py-2 max-w-[90%]">
-                            <div
-                              style={{
-                                fontSize: "24px",
-                                color: "#ffffff",
-                                fontWeight: "bold",
-                                fontFamily: "Impact, Charcoal, sans-serif",
-                                textShadow: `
-                                  -3px -3px 0 #000,
-                                  3px -3px 0 #000,
-                                  -3px 3px 0 #000,
-                                  3px 3px 0 #000,
-                                  0px -3px 0 #000,
-                                  0px 3px 0 #000,
-                                  -3px 0px 0 #000,
-                                  3px 0px 0 #000
-                                `,
-                              }}
-                            >
-                              {textData.topText || textData.bottomText}
-                            </div>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center bg-gray-800 text-gray-400">
-                          <div className="text-center">
-                            <div className="text-4xl mb-2">📺</div>
-                            <div>Aucun média sélectionné</div>
-                            <div className="text-sm mt-1">
-                              Ajoutez un média, enregistrez une vidéo ou du
-                              texte pour voir l'aperçu
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                      <Icons.Close size={14} className="text-white" />
+                    </button>
                   </div>
-
-                  <div>
-                    <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                      Texte overlay
-                    </h3>
-                    <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                          Texte du haut
-                        </label>
-                        <input
-                          ref={topTextInputRef}
-                          type="text"
-                          value={textData.topText}
-                          onChange={(e) =>
-                            setTextData((prev) => ({
-                              ...prev,
-                              topText: e.target.value,
-                            }))
-                          }
-                          placeholder="Entrez votre texte du haut..."
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:border-indigo-500 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                          Texte du bas
-                        </label>
-                        <input
-                          ref={bottomTextInputRef}
-                          type="text"
-                          value={textData.bottomText}
-                          onChange={(e) =>
-                            setTextData((prev) => ({
-                              ...prev,
-                              bottomText: e.target.value,
-                            }))
-                          }
-                          placeholder="Entrez votre texte du bas..."
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:border-indigo-500 focus:outline-none"
-                        />
-                      </div>
+                ) : (
+                  <div className="flex flex-col items-center text-center p-4">
+                    <div
+                      className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3 animate-float"
+                      style={{ background: "var(--bg-card)", border: "3px solid var(--border-card)" }}
+                    >
+                      <Icons.Upload size={28} style={{ color: "var(--text-muted)" }} />
                     </div>
+                    <p className="font-bold text-sm mb-1" style={{ color: "var(--text-gray)" }}>
+                      {t("media.drop_here")}
+                    </p>
+                    <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+                      {t("media.or_click")}
+                    </p>
+                    <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="image/*,video/*" />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="cartoon-btn px-5 py-2 text-sm"
+                      style={{ background: "var(--accent-cyan)", color: "#000" }}
+                    >
+                      {t("media.choose_file")}
+                    </button>
                   </div>
+                )}
+              </div>
 
+              {/* Right: Controls */}
+              <div className="flex flex-col gap-3 min-w-0" style={{ flex: "0 0 260px" }}>
+                <h2 className="font-cartoon text-base flex items-center gap-2" style={{ color: "var(--accent-pink)" }}>
+                  <Icons.Media size={18} /> {t("media.your_shitpost")}
+                </h2>
+
+                {/* Text inputs */}
+                <div>
+                  <label className="text-xs font-bold mb-1 block" style={{ color: "var(--text-muted)" }}>{t("media.top_text").toUpperCase()}</label>
+                  <input
+                    type="text"
+                    value={textData.topText}
+                    onChange={(e) => setTextData((p) => ({ ...p, topText: e.target.value }))}
+                    className="cartoon-input w-full text-xs py-1.5"
+                    placeholder="IMPACT TEXT..."
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold mb-1 block" style={{ color: "var(--text-muted)" }}>{t("media.bottom_text").toUpperCase()}</label>
+                  <input
+                    type="text"
+                    value={textData.bottomText}
+                    onChange={(e) => setTextData((p) => ({ ...p, bottomText: e.target.value }))}
+                    className="cartoon-input w-full text-xs py-1.5"
+                    placeholder="BOTTOM TEXT..."
+                  />
+                </div>
+
+                {/* Text position */}
+                {(textData.topText || textData.bottomText) && (
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => setTextPosition("on")}
+                      className="cartoon-btn px-3 py-1 text-xs flex-1"
+                      style={{
+                        background: textPosition === "on" ? "var(--accent-yellow)" : "var(--bg-input)",
+                        color: textPosition === "on" ? "#000" : "var(--text-gray)",
+                        borderColor: textPosition === "on" ? "#000" : "var(--border-card)",
+                      }}
+                    >
+                      {t("media.text_on")}
+                    </button>
+                    <button
+                      onClick={() => setTextPosition("around")}
+                      className="cartoon-btn px-3 py-1 text-xs flex-1"
+                      style={{
+                        background: textPosition === "around" ? "var(--accent-cyan)" : "var(--bg-input)",
+                        color: textPosition === "around" ? "#000" : "var(--text-gray)",
+                        borderColor: textPosition === "around" ? "#000" : "var(--border-card)",
+                      }}
+                    >
+                      {t("media.text_around")}
+                    </button>
+                  </div>
+                )}
+
+                {/* Text size */}
+                {(textData.topText || textData.bottomText) && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Durée d'affichage (ms)
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-xs font-bold" style={{ color: "var(--text-muted)" }}>{t("media.text_size").toUpperCase()}</label>
+                      <span className="text-xs font-bold" style={{ color: "var(--text-gray)" }}>{textSize}px</span>
+                    </div>
                     <input
-                      type="number"
-                      value={timeoutMs}
-                      onChange={(e) => setTimeoutMs(Number(e.target.value))}
-                      min={TIMEOUT_LIMITS.min}
-                      max={TIMEOUT_LIMITS.max}
-                      step={TIMEOUT_LIMITS.step}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:border-indigo-500 focus:outline-none"
+                      type="range"
+                      min={16}
+                      max={120}
+                      step={2}
+                      value={textSize}
+                      onChange={(e) => setTextSize(Number(e.target.value))}
+                      className="w-full"
                     />
                   </div>
+                )}
 
+                {/* Audio */}
+                {mediaData?.type === "image" && (
+                  <div>
+                    <input ref={audioInputRef} type="file" className="hidden" onChange={handleAudioUpload} accept="audio/*" />
+                    <button
+                      onClick={() => audioInputRef.current?.click()}
+                      className="cartoon-btn w-full px-3 py-1.5 text-xs flex items-center justify-center gap-1.5"
+                      style={{ background: "var(--accent-purple)", color: "#fff" }}
+                    >
+                      <Icons.Music size={13} />
+                      {audioData ? audioData.name : t("media.choose_audio")}
+                    </button>
+                    {audioData && (
+                      <button
+                        onClick={() => setAudioData(null)}
+                        className="cartoon-btn w-full px-3 py-1 text-xs mt-1"
+                        style={{ background: "var(--bg-input)", color: "var(--accent-red)" }}
+                      >
+                        {t("media.remove_audio")}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Video Trim */}
+                {mediaData?.type === "video" && videoDuration > 0 && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+                        <Icons.Clock size={13} /> DECOUPE
+                      </label>
+                      <span
+                        className="cartoon-badge text-xs"
+                        style={{ background: "var(--accent-cyan)", color: "#000", borderColor: "#000", padding: "1px 8px" }}
+                      >
+                        {trimStart.toFixed(1)}s → {trimEnd.toFixed(1)}s ({(trimEnd - trimStart).toFixed(1)}s)
+                      </span>
+                    </div>
+                    <div
+                      className="relative rounded-lg"
+                      style={{ height: 32, background: "var(--bg-input)", border: "2px solid var(--border-card)", cursor: "default", userSelect: "none" }}
+                      onMouseDown={(e) => {
+                        const track = e.currentTarget;
+                        const rect = track.getBoundingClientRect();
+                        const pxToTime = (px: number) => Math.max(0, Math.min(videoDuration, (px / rect.width) * videoDuration));
+                        const clickTime = pxToTime(e.clientX - rect.left);
+                        const startPx = (trimStart / videoDuration) * rect.width;
+                        const endPx = (trimEnd / videoDuration) * rect.width;
+                        const mouseX = e.clientX - rect.left;
+
+                        const HANDLE_ZONE = 12;
+                        let mode: "start" | "end" | "move";
+                        if (Math.abs(mouseX - startPx) <= HANDLE_ZONE) {
+                          mode = "start";
+                        } else if (Math.abs(mouseX - endPx) <= HANDLE_ZONE) {
+                          mode = "end";
+                        } else if (mouseX > startPx && mouseX < endPx) {
+                          mode = "move";
+                        } else {
+                          // Click outside: snap nearest handle
+                          mode = Math.abs(clickTime - trimStart) < Math.abs(clickTime - trimEnd) ? "start" : "end";
+                        }
+
+                        const clipLen = trimEnd - trimStart;
+                        const moveOffset = clickTime - trimStart;
+
+                        const onMove = (ev: MouseEvent) => {
+                          const t = pxToTime(ev.clientX - rect.left);
+                          const maxClip = TIMEOUT_LIMITS.maxVideo / 1000;
+                          if (mode === "start") {
+                            const v = Math.max(0, Math.min(t, trimEnd - 0.5));
+                            const newEnd = trimEnd;
+                            if (newEnd - v > maxClip) return;
+                            setTrimStart(v);
+                            setTimeoutMs(Math.min(Math.round((newEnd - v) * 1000), TIMEOUT_LIMITS.maxVideo));
+                            if (previewVideoRef.current) previewVideoRef.current.currentTime = v;
+                          } else if (mode === "end") {
+                            const v = Math.min(videoDuration, Math.max(t, trimStart + 0.5));
+                            const clamped = Math.min(v, trimStart + maxClip);
+                            setTrimEnd(clamped);
+                            setTimeoutMs(Math.min(Math.round((clamped - trimStart) * 1000), TIMEOUT_LIMITS.maxVideo));
+                            if (previewVideoRef.current) previewVideoRef.current.currentTime = Math.max(clamped - 0.3, trimStart);
+                          } else {
+                            // Move both handles keeping same clip length
+                            let newStart = t - moveOffset;
+                            newStart = Math.max(0, Math.min(newStart, videoDuration - clipLen));
+                            setTrimStart(newStart);
+                            setTrimEnd(newStart + clipLen);
+                            if (previewVideoRef.current) previewVideoRef.current.currentTime = newStart;
+                          }
+                        };
+
+                        const onUp = () => {
+                          window.removeEventListener("mousemove", onMove);
+                          window.removeEventListener("mouseup", onUp);
+                        };
+
+                        window.addEventListener("mousemove", onMove);
+                        window.addEventListener("mouseup", onUp);
+                        onMove(e.nativeEvent);
+                      }}
+                    >
+                      {/* Inactive zone left */}
+                      <div
+                        className="absolute top-0 bottom-0 left-0 rounded-l-md"
+                        style={{
+                          width: `${(trimStart / videoDuration) * 100}%`,
+                          background: "rgba(0,0,0,0.35)",
+                        }}
+                      />
+                      {/* Active zone */}
+                      <div
+                        className="absolute top-0 bottom-0"
+                        style={{
+                          left: `${(trimStart / videoDuration) * 100}%`,
+                          width: `${((trimEnd - trimStart) / videoDuration) * 100}%`,
+                          background: "var(--accent-cyan)",
+                          opacity: 0.3,
+                          cursor: "grab",
+                        }}
+                      />
+                      {/* Inactive zone right */}
+                      <div
+                        className="absolute top-0 bottom-0 right-0 rounded-r-md"
+                        style={{
+                          width: `${((videoDuration - trimEnd) / videoDuration) * 100}%`,
+                          background: "rgba(0,0,0,0.35)",
+                        }}
+                      />
+                      {/* Start handle */}
+                      <div
+                        className="absolute top-0 bottom-0 flex items-center justify-center"
+                        style={{
+                          left: `${(trimStart / videoDuration) * 100}%`,
+                          transform: "translateX(-50%)",
+                          width: 14,
+                          cursor: "ew-resize",
+                          zIndex: 4,
+                        }}
+                      >
+                        <div style={{ width: 4, height: 18, borderRadius: 2, background: "var(--accent-cyan)", border: "1px solid #000" }} />
+                      </div>
+                      {/* End handle */}
+                      <div
+                        className="absolute top-0 bottom-0 flex items-center justify-center"
+                        style={{
+                          left: `${(trimEnd / videoDuration) * 100}%`,
+                          transform: "translateX(-50%)",
+                          width: 14,
+                          cursor: "ew-resize",
+                          zIndex: 4,
+                        }}
+                      >
+                        <div style={{ width: 4, height: 18, borderRadius: 2, background: "var(--accent-pink)", border: "1px solid #000" }} />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Duration (images only) */}
+                {mediaData?.type !== "video" && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+                        <Icons.Clock size={13} /> {t("media.duration").toUpperCase()}
+                      </label>
+                      <span
+                        className="cartoon-badge text-xs"
+                        style={{ background: "var(--accent-yellow)", color: "#000", borderColor: "#000", padding: "1px 8px" }}
+                      >
+                        {(timeoutMs / 1000).toFixed(1)}s
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={TIMEOUT_LIMITS.min}
+                      max={TIMEOUT_LIMITS.maxImage}
+                      step={TIMEOUT_LIMITS.step}
+                      value={Math.min(timeoutMs, TIMEOUT_LIMITS.maxImage)}
+                      onChange={(e) => setTimeoutMs(Number(e.target.value))}
+                      className="w-full"
+                    />
+                  </div>
+                )}
+
+                {/* Send */}
+                <button
+                  onClick={handleSend}
+                  disabled={selectedTargets.length === 0 || !mediaData || compressing}
+                  className="cartoon-btn w-full py-3 text-sm flex items-center justify-center gap-2 mt-auto"
+                  style={{
+                    background: compressing
+                      ? "linear-gradient(135deg, var(--accent-cyan), var(--accent-purple))"
+                      : "linear-gradient(135deg, var(--accent-pink), var(--accent-orange))",
+                    color: "#fff",
+                  }}
+                >
+                  {compressing ? (
+                    <>{t("media.compress")} {compressProgress}%</>
+                  ) : (
+                    <>
+                      <Icons.Send size={16} />
+                      {t("media.send")} ({selectedTargets.length})
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "social" && (
+            <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+              {/* Add friend */}
+              <div className="cartoon-card p-4 flex-shrink-0">
+                <h2 className="font-cartoon text-base mb-3 flex items-center gap-2" style={{ color: "var(--accent-cyan)" }}>
+                  <Icons.Users size={18} /> {t("friends.add")}
+                </h2>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSendFriendRequest()}
+                    placeholder={t("friends.username_placeholder")}
+                    className="cartoon-input flex-1"
+                  />
                   <button
-                    onClick={handleSend}
-                    disabled={
-                      (!mediaData &&
-                        !textData.topText &&
-                        !textData.bottomText) ||
-                      selectedClients.length === 0
-                    }
-                    className="w-full bg-gradient-to-r from-green-500 to-green-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-green-600 hover:to-green-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed transition-all duration-200 transform hover:-translate-y-0.5 disabled:transform-none"
+                    onClick={handleSendFriendRequest}
+                    className="cartoon-btn px-5"
+                    style={{ background: "var(--accent-cyan)", color: "#000" }}
                   >
-                    📤 Envoyer ({selectedClients.length} client
-                    {selectedClients.length > 1 ? "s" : ""})
+                    {t("friends.send")}
                   </button>
                 </div>
               </div>
-            </div>
 
-            <div className="lg:col-span-2">
-              <div className="bg-white rounded-xl shadow-2xl p-6">
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                  Clients connectés ({clients.length})
-                </h3>
-                <div className="flex space-x-2 mb-4">
-                  <button
-                    onClick={handleSelectAll}
-                    className="px-3 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors"
-                  >
-                    Tout
-                  </button>
-                  <button
-                    onClick={handleSelectNone}
-                    className="px-3 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors"
-                  >
-                    Aucun
-                  </button>
-                </div>
-                <div className="max-h-64 overflow-y-auto space-y-2">
-                  {clients.map((client) => (
-                    <div
-                      key={client.id}
-                      className="py-2 border-b border-gray-100 last:border-b-0"
-                    >
-                      <label className="flex items-center space-x-3 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={selectedClients.includes(client.id)}
-                          onChange={() => handleClientToggle(client.id)}
-                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                        />
-                        <span className="text-sm text-gray-700">
-                          {client.name || client.id}
-                        </span>
-                      </label>
+              {/* Scrollable content for pending + groups */}
+              <div className="flex-1 overflow-y-auto space-y-4 min-h-0">
+                {/* Pending requests */}
+                {pendingRequests.length > 0 && (
+                  <div className="cartoon-card p-4" style={{ borderColor: "var(--accent-orange)" }}>
+                    <h3 className="font-cartoon text-sm mb-3" style={{ color: "var(--accent-orange)" }}>
+                      {t("friends.pending").toUpperCase()} ({pendingRequests.length})
+                    </h3>
+                    <div className="space-y-2">
+                      {pendingRequests.map((req) => (
+                        <div key={req.id} className="flex items-center justify-between p-3 rounded-xl" style={{ background: "var(--bg-input)" }}>
+                          <div className="flex items-center gap-3">
+                            <div className="cartoon-avatar" style={{ background: getAvatarColor(req.requester?.username || req.sender?.username || ""), width: 32, height: 32, fontSize: 12 }}>
+                              {(req.requester?.username || req.sender?.username)?.[0]?.toUpperCase()}
+                            </div>
+                            <span className="font-bold text-sm">{req.requester?.username || req.sender?.username}</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleAcceptFriend(req.id)}
+                              className="cartoon-btn px-3 py-1 text-xs"
+                              style={{ background: "var(--accent-green)", color: "#000" }}
+                            >
+                              {t("friends.accept")}
+                            </button>
+                            <button
+                              onClick={() => handleDeclineFriend(req.id)}
+                              className="cartoon-btn px-3 py-1 text-xs"
+                              style={{ background: "var(--accent-red)", color: "#fff" }}
+                            >
+                              {t("friends.decline")}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Groups */}
+                <div className="cartoon-card p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-cartoon text-base flex items-center gap-2" style={{ color: "var(--accent-purple)" }}>
+                      <Icons.Broadcast size={18} /> {t("sidebar.groups")}
+                    </h2>
+                    <button
+                      onClick={handleCreateGroup}
+                      className="cartoon-btn px-4 py-1 text-xs"
+                      style={{ background: "var(--accent-purple)", color: "#fff" }}
+                    >
+                      + {t("groups.create")}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {groups.map((g) => {
+                      const myRole = getMyRole(g);
+                      return (
+                        <div key={g.id} className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+                          <div className="flex justify-between items-start mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold">{g.name}</span>
+                              <span className="text-xs px-1.5 py-0.5 rounded font-bold" style={{
+                                background: myRole === "owner" ? "var(--accent-yellow)" : myRole === "admin" ? "var(--accent-cyan)" : "var(--bg-card)",
+                                color: myRole === "owner" || myRole === "admin" ? "#000" : "var(--text-gray)",
+                                fontSize: 10,
+                              }}>
+                                {myRole === "owner" ? t("groups.owner") : myRole === "admin" ? t("groups.admin") : t("groups.member")}
+                              </span>
+                            </div>
+                            <span className="text-xs px-2 py-0.5 rounded" style={{ background: "var(--bg-card)", color: "var(--text-gray)" }}>
+                              {g.members?.length || 0}
+                            </span>
+                          </div>
+                          <div className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+                            {g.members?.map((m: any) => {
+                              const badge = m.role === "owner" ? " (owner)" : m.role === "admin" ? " (admin)" : "";
+                              return (m.user?.username || "") + badge;
+                            }).filter(Boolean).join(", ") || t("groups.no_groups")}
+                          </div>
+                          <div className="flex gap-2">
+                            {(myRole === "owner" || myRole === "admin") && (
+                              <button
+                                onClick={() => handleAddMember(g.id)}
+                                className="text-xs font-bold" style={{ color: "var(--accent-cyan)" }}
+                              >
+                                + {t("groups.add_member")}
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleManageGroup(g.id)}
+                              className="text-xs font-bold" style={{ color: "var(--accent-purple)" }}
+                            >
+                              {t("groups.manage")}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {groups.length === 0 && (
+                      <p className="col-span-2 text-center py-6 text-sm" style={{ color: "var(--text-muted)" }}>
+                        {t("groups.no_groups")}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "settings" && (
+            <div className="cartoon-card p-5 flex-1 overflow-y-auto space-y-4">
+              <h2 className="font-cartoon text-xl" style={{ color: "var(--accent-yellow)" }}>
+                {t("settings.title")}
+              </h2>
+              <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+                <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.username").toUpperCase()}</p>
+                <p className="font-bold">{user?.username}</p>
+              </div>
+              <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+                <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.user_id").toUpperCase()}</p>
+                <code className="text-xs" style={{ color: "var(--accent-cyan)" }}>{user?.id}</code>
+              </div>
+              <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+                <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.server").toUpperCase()}</p>
+                <code className="text-xs" style={{ color: "var(--accent-cyan)" }}>{SERVER_URL}</code>
+              </div>
+              <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-bold flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+                    <Icons.Volume size={14} /> {t("settings.volume").toUpperCase()}
+                  </p>
+                  <span
+                    className="cartoon-badge"
+                    style={{ background: "var(--accent-purple)", color: "#fff", borderColor: "#000", fontSize: 12, padding: "2px 10px" }}
+                  >
+                    {memeVolume}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={memeVolume}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setMemeVolume(v);
+                    localStorage.setItem("memeVolume", String(v));
+                  }}
+                  className="w-full"
+                />
+                <div className="flex justify-between text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                  <span>{t("settings.mute")}</span>
+                  <span>{t("settings.max")}</span>
+                </div>
+              </div>
+              <div
+                className="p-4 rounded-xl flex items-center justify-between"
+                style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}
+              >
+                <div>
+                  <p className="text-xs font-bold flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+                    <Icons.Settings size={14} /> {t("settings.autostart").toUpperCase()}
+                  </p>
+                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                    {t("settings.autostart")}
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    const newVal = !autostart;
+                    const invoke = (window as any).__TAURI__?.core?.invoke;
+                    if (invoke) {
+                      invoke("set_autostart", { enabled: newVal }).then(() => setAutostart(newVal)).catch(() => {});
+                    }
+                  }}
+                  className="relative rounded-full transition-colors"
+                  style={{
+                    width: 44, height: 24, flexShrink: 0,
+                    background: autostart ? "var(--accent-green)" : "var(--bg-card)",
+                    border: "2px solid #000",
+                  }}
+                >
+                  <div
+                    className="absolute top-0.5 rounded-full transition-all"
+                    style={{
+                      width: 16, height: 16,
+                      background: "#fff",
+                      border: "2px solid #000",
+                      left: autostart ? 22 : 2,
+                    }}
+                  />
+                </button>
+              </div>
+              <div
+                className="p-4 rounded-xl flex items-center justify-between"
+                style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}
+              >
+                <p className="text-xs font-bold" style={{ color: "var(--text-muted)" }}>
+                  {t("settings.language").toUpperCase()}
+                </p>
+                <div className="flex gap-1">
+                  {(["fr", "en"] as const).map((l) => (
+                    <button
+                      key={l}
+                      onClick={() => setLang(l)}
+                      className="cartoon-btn px-3 py-1 text-xs font-bold"
+                      style={lang === l
+                        ? { background: "var(--accent-cyan)", color: "#000" }
+                        : { background: "var(--bg-card)" }
+                      }
+                    >
+                      {l.toUpperCase()}
+                    </button>
                   ))}
-                  {clients.length === 0 && (
-                    <p className="text-center text-gray-500 italic py-4">
-                      Aucun client connecté
+                </div>
+              </div>
+              <button
+                onClick={() => { logout(); navigate("/login"); }}
+                className="cartoon-btn w-full py-3 flex items-center justify-center gap-2"
+                style={{ background: "var(--accent-red)", color: "#fff" }}
+              >
+                <Icons.Trash size={18} /> {t("sidebar.logout")}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Right Sidebar - Targets card */}
+        <div className="hidden lg:flex flex-col flex-shrink-0" style={{ width: 260 }}>
+          <div className="cartoon-card p-4 flex flex-col flex-1 overflow-hidden">
+            <h2 className="font-cartoon text-base mb-1 flex items-center gap-2 flex-shrink-0" style={{ color: "var(--accent-cyan)" }}>
+              <Icons.Users size={18} /> {t("sidebar.friends")}
+            </h2>
+            <p className="text-xs mb-3 flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+              {onlineCount} {t("friends.online").toLowerCase()}
+            </p>
+
+            <div className="flex-1 overflow-y-auto space-y-4 pr-1 min-h-0">
+              {/* Groups */}
+              {groups.length > 0 && (
+                <div>
+                  <h3 className="text-xs font-bold mb-2 uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+                    {t("sidebar.groups")}
+                  </h3>
+                  <div className="space-y-1">
+                    {groups.map((group) => {
+                      const memberIds = group.members?.map((m: any) => m.userId).filter((id: string) => id !== user?.id) || [];
+                      const allSelected = memberIds.length > 0 && memberIds.every((id: string) => selectedTargets.includes(id));
+                      return (
+                        <div
+                          key={group.id}
+                          onClick={() => handleSelectGroup(group.id)}
+                          className={`friend-item ${allSelected ? "selected" : ""}`}
+                        >
+                          <div
+                            className="w-[30px] h-[30px] rounded-lg flex items-center justify-center flex-shrink-0 font-cartoon font-bold text-xs"
+                            style={{
+                              background: allSelected ? "var(--accent-purple)" : "rgba(184,84,212,0.15)",
+                              color: allSelected ? "#fff" : "var(--accent-purple)",
+                              border: "2px solid #000",
+                            }}
+                          >
+                            {group.name[0].toUpperCase()}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-bold truncate">{group.name}</p>
+                          </div>
+                          <span
+                            className="text-xs font-bold px-2 py-0.5 rounded-lg flex-shrink-0"
+                            style={{
+                              background: allSelected ? "var(--accent-purple)" : "var(--bg-input)",
+                              color: allSelected ? "#fff" : "var(--text-muted)",
+                              border: "2px solid var(--border-card)",
+                              fontSize: 10,
+                            }}
+                          >
+                            {allSelected ? t("general.all") : t("general.choose")}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Friends */}
+              <div>
+                <h3 className="text-xs font-bold mb-2 uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+                  {t("sidebar.friends")}
+                </h3>
+                <div className="space-y-1">
+                  {friends.map((friend) => {
+                    const isOnline = onlineFriendIds.includes(friend.id);
+                    const isSelected = selectedTargets.includes(friend.id);
+                    return (
+                      <div
+                        key={friend.id}
+                        onClick={() => handleTargetToggle(friend.id)}
+                        className={`friend-item ${isSelected ? "selected" : ""}`}
+                      >
+                        <div className="relative">
+                          <div
+                            className="cartoon-avatar"
+                            style={{
+                              background: getAvatarColor(friend.username),
+                              width: 30,
+                              height: 30,
+                              fontSize: 12,
+                              borderColor: isSelected ? "var(--accent-cyan)" : "#000",
+                            }}
+                          >
+                            {friend.username[0].toUpperCase()}
+                          </div>
+                          <div
+                            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 ${isOnline ? "online-pulse" : ""}`}
+                            style={{
+                              background: isOnline ? "var(--accent-green)" : "var(--text-muted)",
+                              borderColor: "var(--bg-card)",
+                            }}
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-bold truncate">{friend.username}</p>
+                          <p className="text-xs" style={{ color: isOnline ? "var(--accent-green)" : "var(--text-muted)", fontSize: 10 }}>
+                            {isOnline ? t("friends.online") : t("friends.offline")}
+                          </p>
+                        </div>
+                        <div
+                          className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
+                          style={{
+                            border: `2px solid ${isSelected ? "var(--accent-cyan)" : "var(--border-card)"}`,
+                            background: isSelected ? "var(--accent-cyan)" : "transparent",
+                          }}
+                        >
+                          {isSelected && <Icons.Zap size={10} className="text-black" />}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {friends.length === 0 && (
+                    <p className="text-xs text-center py-3" style={{ color: "var(--text-muted)" }}>
+                      {t("friends.no_friends")}
                     </p>
                   )}
                 </div>
               </div>
             </div>
           </div>
-        )}
-
-        {activeTab === "settings" && (
-          <div className="max-w-2xl mx-auto">
-            <div className="bg-white rounded-xl shadow-2xl p-8">
-              <div className="space-y-8">
-                <div>
-                  <h3 className="text-xl font-semibold text-gray-900 mb-4">
-                    Configuration du profil
-                  </h3>
-                  <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700">
-                        Pseudo actuel
-                      </label>
-                      <span className="text-sm text-gray-900 font-mono">
-                        {SHARED_CONFIG.pseudo}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => setShowConfig(true)}
-                      className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors"
-                    >
-                      Modifier
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <h3 className="text-xl font-semibold text-gray-900 mb-4">
-                    Informations système
-                  </h3>
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                      <label className="text-sm font-medium text-gray-700">
-                        Machine ID
-                      </label>
-                      <span className="text-sm text-gray-900 font-mono">
-                        {SHARED_CONFIG.machineId}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                      <label className="text-sm font-medium text-gray-700">
-                        Serveur
-                      </label>
-                      <span className="text-sm text-gray-900 font-mono">
-                        {SHARED_CONFIG.serverUrl}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                      <label className="text-sm font-medium text-gray-700">
-                        Socket ID
-                      </label>
-                      <span className="text-sm text-gray-900 font-mono">
-                        {socket?.id || "N/A"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <h3 className="text-xl font-semibold text-gray-900 mb-4">
-                    Actions système
-                  </h3>
-                  <button
-                    onClick={handleClearMachineId}
-                    className="w-full bg-red-600 text-white font-medium py-3 px-6 rounded-lg hover:bg-red-700 transition-all duration-200 transform hover:-translate-y-0.5"
-                  >
-                    🔄 Réinitialiser Machine ID
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        </div>
       </main>
     </div>
+  );
+}
+
+function App() {
+  const { user } = useAuth();
+
+  return (
+    <Routes>
+      <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
+      <Route path="/register" element={user ? <Navigate to="/" replace /> : <RegisterPage />} />
+      <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <MainChat />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
 

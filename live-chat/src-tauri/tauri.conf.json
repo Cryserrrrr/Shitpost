@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "live-chat",
+  "productName": "Shitpost",
   "version": "0.1.0",
-  "identifier": "com.cryser.live-chat",
+  "identifier": "com.cryser.shitpost",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,25 +13,28 @@
     "windows": [
       {
         "label": "main",
-        "title": "Meme Studio",
-        "width": 1000,
-        "height": 700,
+        "title": "Shitpost",
+        "width": 1100,
+        "height": 750,
+        "minWidth": 900,
+        "minHeight": 600,
         "alwaysOnTop": false,
         "skipTaskbar": false,
-        "decorations": true,
+        "decorations": false,
         "transparent": false,
         "resizable": true,
         "minimizable": true,
         "maximizable": true,
         "closable": true,
-        "visible": true
+        "visible": true,
+        "center": true
       },
       {
         "label": "overlay",
         "title": "Overlay",
         "url": "overlay.html",
         "visible": true,
-        "decorations": true,
+        "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
@@ -42,14 +45,14 @@
         "minimizable": false,
         "maximizable": false,
         "closable": false,
-        "fullscreen": true,
-        "shadow": false,
-        "center": true
+        "fullscreen": false,
+        "shadow": false
       }
     ],
     "security": {
-      "csp": null
-    }
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss: http: https:; img-src 'self' data: blob:; media-src 'self' data: blob:"
+    },
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": true,

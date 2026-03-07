@@ -1,12 +1,23 @@
 export const APP_NAMES = {
-  main: "Meme Studio App",
-  overlay: "Meme Studio App (Overlay)",
+  main: "Meme Studio",
+  overlay: "Meme Studio (Overlay)",
 } as const;
 
+export const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:3000";
+
 export const SOCKET_CONFIG = {
-  transports: ["websocket", "polling"] as string[],
-  timeout: 20000,
+  transports: ["websocket"] as string[],
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
 };
+
+export const TIMEOUT_LIMITS = {
+  min: 1000,
+  max: 30000,
+  step: 500,
+} as const;
 
 export const IMAGE_OPTIONS = {
   maxWidth: 800,
@@ -20,15 +31,4 @@ export const TEXT_CONFIG = {
   strokeStyle: "black",
   lineWidth: 3,
   textAlign: "center" as CanvasTextAlign,
-} as const;
-
-export const TEXT_POSITIONS = {
-  top: 60,
-  bottom: 20,
-} as const;
-
-export const TIMEOUT_LIMITS = {
-  min: 1000,
-  max: 30000,
-  step: 1000,
 } as const;
