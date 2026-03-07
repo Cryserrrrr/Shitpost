@@ -18,15 +18,25 @@ dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 const app = express();
 const httpServer = createServer(app);
 
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",")
-  : ["http://localhost:1420", "http://127.0.0.1:1420", "tauri://localhost"];
+const EXTRA_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
+  : [];
 
-console.log("[CONFIG] Allowed origins:", ALLOWED_ORIGINS);
+const isAllowedOrigin = (origin: string | undefined): boolean => {
+  if (!origin) return true; // allow non-browser requests (curl, Tauri custom protocol)
+  if (origin === "tauri://localhost") return true;
+  if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) return true;
+  return EXTRA_ORIGINS.includes(origin);
+};
+
+console.log("[CONFIG] Extra allowed origins:", EXTRA_ORIGINS);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: ALLOWED_ORIGINS,
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) callback(null, true);
+      else callback(new Error("Not allowed by CORS"));
+    },
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -53,7 +63,13 @@ const authLimiter = rateLimit({
   message: { error: "Too many auth attempts, please try again later" },
 });
 
-app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
+app.use(cors({
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) callback(null, true);
+    else callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 

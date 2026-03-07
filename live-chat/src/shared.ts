@@ -22,7 +22,7 @@ const getOrCreatePseudo = (): string => {
 
 export const SHARED_CONFIG = {
   machineId: getOrCreateMachineId(),
-  serverUrl: import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:3000",
+  get serverUrl() { return localStorage.getItem("serverUrl") || "http://127.0.0.1:3000"; },
   isDev: import.meta.env.VITE_DEV_MODE === "true",
   pseudo: getOrCreatePseudo(),
 };

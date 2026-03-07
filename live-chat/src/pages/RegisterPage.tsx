@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { useLang } from "../contexts/LangContext";
+import { getServerUrl, setServerUrl } from "../services/api";
 import api from "../services/api";
 import { Icons } from "../components/Icons";
 import Titlebar from "../components/Titlebar";
@@ -11,6 +12,8 @@ const RegisterPage: React.FC = () => {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showServerConfig, setShowServerConfig] = useState(!localStorage.getItem("serverUrl"));
+  const [serverUrlInput, setServerUrlInput] = useState(getServerUrl());
   const { login } = useAuth();
   const { t } = useLang();
   const navigate = useNavigate();
@@ -160,6 +163,46 @@ const RegisterPage: React.FC = () => {
             {t("auth.login_link")}
           </Link>
         </p>
+
+        <div className="mt-4 text-center">
+          <button
+            type="button"
+            onClick={() => setShowServerConfig(!showServerConfig)}
+            className="text-xs inline-flex items-center gap-1 opacity-60 hover:opacity-100 transition-opacity"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Icons.Settings size={12} /> {t("settings.server")}
+          </button>
+          {showServerConfig && (
+            <div className="mt-2 p-3 rounded-xl animate-bounce-in" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+              <label className="text-xs font-bold mb-1 block" style={{ color: "var(--text-muted)" }}>
+                {t("settings.server_url")}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={serverUrlInput}
+                  onChange={(e) => setServerUrlInput(e.target.value)}
+                  className="cartoon-input flex-1 text-xs"
+                  placeholder={t("settings.server_url_placeholder")}
+                />
+                <button
+                  type="button"
+                  className="cartoon-btn text-xs px-3"
+                  style={{ background: "var(--accent-purple)", color: "#fff" }}
+                  onClick={() => {
+                    if (serverUrlInput.trim()) {
+                      setServerUrl(serverUrlInput.trim());
+                      setShowServerConfig(false);
+                    }
+                  }}
+                >
+                  {t("general.save")}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
       </div>
     </div>

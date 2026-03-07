@@ -91,6 +91,11 @@ const translations = {
     "settings.autostart": "Demarrer avec Windows",
     "settings.language": "Langue",
     "settings.pseudo_config": "Configuration du pseudo",
+    "settings.server_edit": "Modifier",
+    "settings.server_url_prompt": "Entrez l'URL du serveur",
+    "settings.server_url": "URL DU SERVEUR",
+    "settings.server_url_placeholder": "https://shitpost.example.com",
+    "settings.server_connect": "Connecter",
 
     // Overlay
     "overlay.from": "de",
@@ -201,6 +206,11 @@ const translations = {
     "settings.autostart": "Start with Windows",
     "settings.language": "Language",
     "settings.pseudo_config": "Username configuration",
+    "settings.server_edit": "Edit",
+    "settings.server_url_prompt": "Enter the server URL",
+    "settings.server_url": "SERVER URL",
+    "settings.server_url_placeholder": "https://shitpost.example.com",
+    "settings.server_connect": "Connect",
 
     // Overlay
     "overlay.from": "from",

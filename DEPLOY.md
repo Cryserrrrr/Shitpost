@@ -61,22 +61,18 @@ curl https://api.shitpost.example.com/health
 # Should return: {"status":"ok","uptime":...,"connections":0}
 ```
 
-## Step 6: Configure the Tauri app
+## Step 6: Build and distribute the Tauri app
 
-Before building the desktop app for distribution, update the client `.env`:
+No `.env` is needed for the client. The server URL is configured at runtime by the user.
 
-```
-VITE_SERVER_URL=https://api.shitpost.example.com
-VITE_API_URL=https://api.shitpost.example.com/api
-```
-
-Then build:
 ```bash
 cd live-chat
 npm run tauri build
 ```
 
 The installer will be in `src-tauri/target/release/bundle/`.
+
+When users launch the app for the first time, the server URL configuration panel will appear on the login/register screen. They enter your server URL (e.g. `https://api.shitpost.example.com`) and can change it later in Settings.
 
 ## Alternative: Dockerfile
 

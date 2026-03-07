@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
 import { t } from "./i18n";
+import { getServerUrl, getApiUrl } from "./services/api";
 import "./overlay.css";
-
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:3000";
 
 interface MediaData {
   mediaType: "image" | "video";
@@ -154,7 +153,7 @@ function Overlay() {
       return () => clearInterval(interval);
     }
 
-    const newSocket = io(SERVER_URL, {
+    const newSocket = io(getServerUrl(), {
       auth: { token },
       transports: ["websocket"],
       reconnection: true,
@@ -179,8 +178,7 @@ function Overlay() {
         const refreshToken = localStorage.getItem("refreshToken");
         if (refreshToken) {
           try {
-            const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
-            const resp = await fetch(`${API_URL}/auth/refresh`, {
+            const resp = await fetch(`${getApiUrl()}/auth/refresh`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ refreshToken }),

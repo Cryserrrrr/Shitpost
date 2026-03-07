@@ -67,11 +67,11 @@ npm run dev
 
 ```bash
 cd live-chat
-cp .env.example .env
-# Edit .env to point VITE_SERVER_URL to your server
 npm install
 npm run tauri dev
 ```
+
+> **No `.env` needed for the client.** The server URL is configured directly in the app at first launch (login/register screen). You can change it anytime in Settings.
 
 ### Building for production
 
@@ -93,12 +93,9 @@ npm run tauri build
 | `NODE_ENV` | `development` or `production` | `development` |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins | `http://localhost:1420,...` |
 
-### Client (`live-chat/.env`)
+### Client
 
-| Variable | Description | Default |
-|---|---|---|
-| `VITE_SERVER_URL` | WebSocket server URL | `http://127.0.0.1:3000` |
-| `VITE_API_URL` | REST API URL | `http://127.0.0.1:3000/api` |
+No environment variables needed. The server URL is configured at runtime via the UI and stored in `localStorage`.
 
 ## Deploying the Server (Coolify / VPS)
 
@@ -110,7 +107,7 @@ See [DEPLOY.md](./DEPLOY.md) for detailed instructions.
 - **Desktop**: Tauri v2 (Rust)
 - **Backend**: Node.js, Express, Socket.io, Prisma ORM
 - **Database**: PostgreSQL
-- **Auth**: JWT access tokens (15min) + refresh tokens (30 days)
+- **Auth**: JWT access tokens (1h) + refresh tokens (30 days)
 
 ## License
 

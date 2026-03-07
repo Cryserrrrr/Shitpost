@@ -3,13 +3,12 @@ import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { io, Socket } from "socket.io-client";
 import { useAuth } from "./contexts/AuthContext";
 import { useLang } from "./contexts/LangContext";
-import api from "./services/api";
+import api, { getServerUrl, getApiUrl, setServerUrl } from "./services/api";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 import { Icons } from "./components/Icons";
 import Titlebar from "./components/Titlebar";
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:3000";
 
 const TIMEOUT_LIMITS = { min: 1000, maxImage: 10000, maxVideo: 30000, step: 500 } as const;
 
@@ -107,8 +106,9 @@ function MainChat() {
   useEffect(() => {
     if (!token) return;
 
-    console.log("[SOCKET] Attempting connection to", SERVER_URL, "with token:", token?.substring(0, 20) + "...");
-    const newSocket = io(SERVER_URL, {
+    const serverUrl = getServerUrl();
+    console.log("[SOCKET] Attempting connection to", serverUrl, "with token:", token?.substring(0, 20) + "...");
+    const newSocket = io(serverUrl, {
       auth: { token },
       transports: ["websocket", "polling"],
       reconnection: true,
@@ -125,8 +125,7 @@ function MainChat() {
         const rt = localStorage.getItem("refreshToken");
         if (rt) {
           try {
-            const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
-            const resp = await fetch(`${API_URL}/auth/refresh`, {
+            const resp = await fetch(`${getApiUrl()}/auth/refresh`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ refreshToken: rt }),
@@ -1406,7 +1405,22 @@ function MainChat() {
               </div>
               <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
                 <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.server").toUpperCase()}</p>
-                <code className="text-xs" style={{ color: "var(--accent-cyan)" }}>{SERVER_URL}</code>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs flex-1" style={{ color: "var(--accent-cyan)" }}>{getServerUrl()}</code>
+                  <button
+                    className="cartoon-btn text-xs px-3 py-1"
+                    style={{ background: "var(--accent-purple)", color: "#fff", fontSize: 11 }}
+                    onClick={() => {
+                      const url = prompt(t("settings.server_url_prompt"), getServerUrl());
+                      if (url && url.trim()) {
+                        setServerUrl(url.trim());
+                        window.location.reload();
+                      }
+                    }}
+                  >
+                    {t("settings.server_edit")}
+                  </button>
+                </div>
               </div>
               <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
                 <div className="flex items-center justify-between mb-2">

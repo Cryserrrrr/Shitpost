@@ -1,13 +1,29 @@
 import axios from "axios";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
+export function getServerUrl(): string {
+  return localStorage.getItem("serverUrl") || "http://127.0.0.1:3000";
+}
+
+export function getApiUrl(): string {
+  return getServerUrl() + "/api";
+}
+
+export function setServerUrl(url: string) {
+  // Normalize: remove trailing slash
+  const clean = url.replace(/\/+$/, "");
+  localStorage.setItem("serverUrl", clean);
+  // Update axios baseURL immediately
+  api.defaults.baseURL = clean + "/api";
+}
 
 const api = axios.create({
-  baseURL: API_URL,
+  baseURL: getApiUrl(),
 });
 
 // Add interceptor to add auth token
 api.interceptors.request.use((config) => {
+  // Always use latest baseURL from localStorage
+  config.baseURL = getApiUrl();
   const token = localStorage.getItem("token");
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -58,7 +74,7 @@ api.interceptors.response.use(
       }
 
       try {
-        const { data } = await axios.post(`${API_URL}/auth/refresh`, { refreshToken });
+        const { data } = await axios.post(`${getApiUrl()}/auth/refresh`, { refreshToken });
         localStorage.setItem("token", data.token);
         localStorage.setItem("refreshToken", data.refreshToken);
         originalRequest.headers.Authorization = `Bearer ${data.token}`;
