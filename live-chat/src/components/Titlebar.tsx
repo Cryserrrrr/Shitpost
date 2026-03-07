@@ -3,9 +3,10 @@ import { Icons } from "./Icons";
 
 interface TitlebarProps {
   children?: React.ReactNode;
+  showMaximize?: boolean;
 }
 
-const Titlebar: React.FC<TitlebarProps> = ({ children }) => {
+const Titlebar: React.FC<TitlebarProps> = ({ children, showMaximize = true }) => {
   const startDrag = () => {
     (window as any).__TAURI__?.window?.getCurrentWindow?.()?.startDragging?.();
   };
@@ -23,7 +24,7 @@ const Titlebar: React.FC<TitlebarProps> = ({ children }) => {
         if ((e.target as HTMLElement).closest("button")) return;
         startDrag();
       }}
-      onDoubleClick={toggleMaximize}
+      onDoubleClick={showMaximize ? toggleMaximize : undefined}
     >
       <div className="flex items-center gap-2 pl-4">
         <div
@@ -47,23 +48,25 @@ const Titlebar: React.FC<TitlebarProps> = ({ children }) => {
         <div className="flex" style={{ marginLeft: 8 }}>
           <button
             onClick={() => (window as any).__TAURI__?.window?.getCurrentWindow?.()?.minimize?.()}
-            className="flex items-center justify-center hover:brightness-125"
+            className="titlebar-btn flex items-center justify-center"
             style={{ width: 36, height: 42, color: "var(--text-muted)" }}
           >
             <svg width="10" height="1"><rect width="10" height="1" fill="currentColor" /></svg>
           </button>
-          <button
-            onClick={toggleMaximize}
-            className="flex items-center justify-center hover:brightness-125"
-            style={{ width: 36, height: 42, color: "var(--text-muted)" }}
-          >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1">
-              <rect x="0.5" y="0.5" width="9" height="9" />
-            </svg>
-          </button>
+          {showMaximize && (
+            <button
+              onClick={toggleMaximize}
+              className="titlebar-btn flex items-center justify-center"
+              style={{ width: 36, height: 42, color: "var(--text-muted)" }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1">
+                <rect x="0.5" y="0.5" width="9" height="9" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={() => (window as any).__TAURI__?.window?.getCurrentWindow?.()?.hide?.()}
-            className="flex items-center justify-center hover:bg-red-600"
+            className="titlebar-close flex items-center justify-center"
             style={{ width: 36, height: 42, color: "var(--text-muted)" }}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">

@@ -51,6 +51,18 @@ body {
   padding: 0;
 }
 
+/* Titlebar buttons */
+.titlebar-btn,
+.titlebar-close {
+  transition: color 0.15s;
+}
+.titlebar-btn:hover {
+  color: var(--text-white) !important;
+}
+.titlebar-close:hover {
+  color: var(--accent-red) !important;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg-dark); }

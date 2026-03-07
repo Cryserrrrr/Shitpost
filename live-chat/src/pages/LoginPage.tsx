@@ -36,21 +36,21 @@ const LoginPage: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-dark)" }}>
-      <Titlebar />
+      <Titlebar showMaximize={false} />
       <div
         className="flex-1 flex items-center justify-center p-4 relative overflow-hidden"
       >
       {/* Background blobs */}
       <div
-        className="fixed top-[-100px] left-[-100px] w-[400px] h-[400px] rounded-full opacity-20 blur-3xl"
+        className="fixed top-[-100px] left-[-100px] w-[400px] h-[400px] rounded-full opacity-20 blur-3xl pointer-events-none"
         style={{ background: "var(--accent-pink)" }}
       />
       <div
-        className="fixed bottom-[-100px] right-[-100px] w-[400px] h-[400px] rounded-full opacity-15 blur-3xl"
+        className="fixed bottom-[-100px] right-[-100px] w-[400px] h-[400px] rounded-full opacity-15 blur-3xl pointer-events-none"
         style={{ background: "var(--accent-cyan)" }}
       />
       <div
-        className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full opacity-5 blur-3xl"
+        className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full opacity-5 blur-3xl pointer-events-none"
         style={{ background: "var(--accent-yellow)" }}
       />
 
