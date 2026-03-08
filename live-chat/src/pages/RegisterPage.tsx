@@ -48,7 +48,7 @@ const RegisterPage: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-dark)" }}>
-      <Titlebar showMaximize={false} />
+      <Titlebar />
       <div
         className="flex-1 flex items-center justify-center p-4 relative overflow-hidden"
       >

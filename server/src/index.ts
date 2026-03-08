@@ -16,6 +16,7 @@ import { BroadcastMediaMessage } from "./types";
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 const app = express();
+app.set("trust proxy", 1);
 const httpServer = createServer(app);
 
 const EXTRA_ORIGINS = process.env.ALLOWED_ORIGINS
@@ -200,8 +201,12 @@ io.on("connection", async (socket) => {
       io.to(`user:${targetId}`).emit("media:show", payload);
     }
 
-    // Confirm to sender
-    socket.emit("media:sent", { targetIds, success: true });
+    // Report delivery status per target
+    const results = targetIds.map((id) => ({
+      targetId: id,
+      delivered: userSockets.has(id),
+    }));
+    socket.emit("media:sent", { results });
   });
 
   // Handle disconnect

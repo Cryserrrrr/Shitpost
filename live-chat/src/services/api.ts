@@ -80,7 +80,7 @@ api.interceptors.response.use(
         originalRequest.headers.Authorization = `Bearer ${data.token}`;
         processQueue(null, data.token);
         return api(originalRequest);
-      } catch (refreshError) {
+      } catch (refreshError: any) {
         processQueue(refreshError, null);
         localStorage.removeItem("token");
         localStorage.removeItem("refreshToken");
@@ -94,5 +94,40 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+/**
+ * Shared token refresh — reuses the interceptor's isRefreshing/queue
+ * so only one refresh happens at a time across the entire app.
+ */
+export async function refreshAuthToken(): Promise<string | null> {
+  if (isRefreshing) {
+    return new Promise<string | null>((resolve) => {
+      refreshQueue.push({
+        resolve: (token: string) => resolve(token),
+        reject: () => resolve(null),
+      });
+    });
+  }
+
+  isRefreshing = true;
+  const refreshToken = localStorage.getItem("refreshToken");
+  if (!refreshToken) {
+    isRefreshing = false;
+    return null;
+  }
+
+  try {
+    const { data } = await axios.post(`${getApiUrl()}/auth/refresh`, { refreshToken });
+    localStorage.setItem("token", data.token);
+    localStorage.setItem("refreshToken", data.refreshToken);
+    processQueue(null, data.token);
+    return data.token;
+  } catch (err: any) {
+    processQueue(err, null);
+    return null;
+  } finally {
+    isRefreshing = false;
+  }
+}
 
 export default api;

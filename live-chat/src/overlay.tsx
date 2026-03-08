@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
+import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n";
-import { getServerUrl, getApiUrl } from "./services/api";
+import { getServerUrl } from "./services/api";
 import "./overlay.css";
 
 interface MediaData {
@@ -34,7 +35,7 @@ function base64ToBlob(base64: string, mimeType: string): Blob {
 function Overlay() {
   const [media, setMedia] = useState<MediaData | null>(null);
   const [animState, setAnimState] = useState<AnimState>("hidden");
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const [connectionStatus, setConnectionStatus] = useState("Connecting...");
 
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -74,6 +75,40 @@ function Overlay() {
       // Clear any existing display
       cleanup();
 
+      // Save to history + auto-save to memes folder
+      if (data.mediaBuffer) {
+        try {
+          const { addHistoryEntry } = await import("./services/historyDb");
+          await addHistoryEntry({
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            timestamp: Date.now(),
+            senderName: data.senderName || "unknown",
+            direction: "received",
+            mediaType: data.mediaType,
+            mimeType: data.mimeType,
+            mediaBase64: data.mediaBuffer,
+            textOverlay: data.textOverlay,
+          });
+        } catch (err) {
+          console.error("Failed to save to history:", err);
+        }
+
+        if (data.mediaType !== "video") {
+          try {
+            const { saveToMemesFolder } = await import("./services/memesUtils");
+            const ext = data.mimeType.split("/")[1]?.replace("jpeg", "jpg") || "png";
+            const sender = data.senderName?.replace(/[^a-zA-Z0-9]/g, "_") || "unknown";
+            const filename = `${sender}_${Date.now()}.${ext}`;
+            const binary = atob(data.mediaBuffer);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            await saveToMemesFolder(bytes, filename);
+          } catch (err) {
+            console.error("Auto-save received meme failed:", err);
+          }
+        }
+      }
+
       setMedia(data);
       setAnimState("entering");
 
@@ -82,9 +117,11 @@ function Overlay() {
         setAnimState("visible");
       }, 500);
 
-      // Play audio if attached (for images with music)
+      // Play audio
       const volume = Math.min(Math.max(Number(localStorage.getItem("memeVolume") ?? 100), 0), 100) / 100;
+      console.log("[MEDIA] Type:", data.mediaType, "| MIME:", data.mimeType, "| Volume:", volume, "| Buffer size:", data.mediaBuffer?.length);
 
+      // For images with attached audio
       if (data.audioBuffer && data.audioMimeType) {
         try {
           const audioBlob = base64ToBlob(data.audioBuffer, data.audioMimeType);
@@ -138,24 +175,16 @@ function Overlay() {
     [cleanup, clearMedia]
   );
 
-  useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
-      setConnectionStatus("Waiting for auth...");
-      // Poll for token
-      const interval = setInterval(() => {
-        const t = localStorage.getItem("token");
-        if (t) {
-          clearInterval(interval);
-          window.location.reload();
-        }
-      }, 2000);
-      return () => clearInterval(interval);
+  // Connect socket helper
+  const connectSocket = useCallback((token: string) => {
+    // Disconnect existing socket if any
+    if (socketRef.current) {
+      socketRef.current.disconnect();
     }
 
     const newSocket = io(getServerUrl(), {
       auth: { token },
-      transports: ["websocket"],
+      transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
@@ -171,27 +200,19 @@ function Overlay() {
       setConnectionStatus("Disconnected");
     });
 
-    newSocket.on("connect_error", async (error) => {
+    newSocket.on("connect_error", (error) => {
       console.error("Overlay connection error:", error.message);
       setConnectionStatus("Error");
       if (error.message.includes("Authentication error")) {
-        const refreshToken = localStorage.getItem("refreshToken");
-        if (refreshToken) {
-          try {
-            const resp = await fetch(`${getApiUrl()}/auth/refresh`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ refreshToken }),
-            });
-            if (resp.ok) {
-              const data = await resp.json();
-              localStorage.setItem("token", data.token);
-              localStorage.setItem("refreshToken", data.refreshToken);
-              newSocket.auth = { token: data.token };
-              newSocket.connect();
-            }
-          } catch {}
-        }
+        // Don't refresh here — the main window handles refresh.
+        // Wait 3s then retry with whatever token is in localStorage.
+        setTimeout(() => {
+          const freshToken = localStorage.getItem("token");
+          if (freshToken) {
+            newSocket.auth = { token: freshToken };
+            newSocket.connect();
+          }
+        }, 3000);
       }
     });
 
@@ -200,13 +221,73 @@ function Overlay() {
       showMedia(data);
     });
 
-    setSocket(newSocket);
+    socketRef.current = newSocket;
+  }, [showMedia]);
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (token) {
+      connectSocket(token);
+    } else {
+      setConnectionStatus("Waiting for auth...");
+    }
+
+    // Listen for token changes from the main window
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "token") {
+        if (e.newValue) {
+          // Token was refreshed or set — update socket auth and reconnect if needed
+          if (socketRef.current) {
+            socketRef.current.auth = { token: e.newValue };
+            if (!socketRef.current.connected) {
+              socketRef.current.connect();
+            }
+          } else {
+            connectSocket(e.newValue);
+          }
+        } else {
+          // Token removed (logout) — disconnect
+          if (socketRef.current) {
+            socketRef.current.disconnect();
+            socketRef.current = null;
+          }
+          setConnectionStatus("Waiting for auth...");
+        }
+      }
+    };
+
+    // Wake/sleep recovery
+    const handleOnline = () => {
+      if (socketRef.current && !socketRef.current.connected) {
+        const currentToken = localStorage.getItem("token");
+        if (currentToken) {
+          socketRef.current.auth = { token: currentToken };
+          socketRef.current.connect();
+        }
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("online", handleOnline);
+
+    // Health check every 30s
+    const healthInterval = setInterval(() => {
+      if (socketRef.current && !socketRef.current.connected) {
+        handleOnline();
+      }
+    }, 30000);
 
     return () => {
       cleanup();
-      newSocket.disconnect();
+      clearInterval(healthInterval);
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("online", handleOnline);
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
     };
-  }, [showMedia, cleanup]);
+  }, [connectSocket, cleanup]);
 
   const getAnimClass = () => {
     switch (animState) {
@@ -246,9 +327,12 @@ function Overlay() {
             <video
               src={mediaUrl}
               autoPlay
+              playsInline
               className="overlay-video"
               ref={(el) => {
-                if (el) el.volume = Math.min(Math.max(Number(localStorage.getItem("memeVolume") ?? 100), 0), 100) / 100;
+                if (el) {
+                  el.volume = Math.min(Math.max(Number(localStorage.getItem("memeVolume") ?? 100), 0), 100) / 100;
+                }
               }}
               onEnded={() => {
                 /* let timeout handle removal */
@@ -285,7 +369,7 @@ function Overlay() {
       {/* Dev status */}
       {import.meta.env.DEV && (
         <div className="dev-status">
-          {connectionStatus} | {socket?.connected ? "OK" : "OFF"}
+          {connectionStatus} | {socketRef.current?.connected ? "OK" : "OFF"}
         </div>
       )}
     </div>

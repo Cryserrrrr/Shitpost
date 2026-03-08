@@ -27,6 +27,13 @@ fn force_overlay_on_top(window: &tauri::WebviewWindow) {
 }
 
 #[tauri::command]
+fn set_overlay_interactive(app: tauri::AppHandle, interactive: bool) -> Result<(), String> {
+    let overlay = app.get_webview_window("overlay").ok_or("overlay not found")?;
+    overlay.set_ignore_cursor_events(!interactive).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn get_autostart(app: tauri::AppHandle) -> bool {
     app.autolaunch().is_enabled().unwrap_or(false)
 }
@@ -42,13 +49,18 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 fn main() {
+    // Allow autoplay with sound in WebView2 (needed for overlay which is non-focusable)
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--autoplay-policy=no-user-gesture-required");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
-        .invoke_handler(tauri::generate_handler![get_autostart, set_autostart])
+        .invoke_handler(tauri::generate_handler![get_autostart, set_autostart, set_overlay_interactive])
         .setup(|app| {
             // Setup overlay window
             let overlay_window = app.get_webview_window("overlay").unwrap();
@@ -68,6 +80,15 @@ fn main() {
 
             overlay_window.set_always_on_top(true).unwrap();
             force_overlay_on_top(&overlay_window);
+
+            // Re-assert topmost every 5 seconds (Windows can demote it)
+            let overlay_clone = overlay_window.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    force_overlay_on_top(&overlay_clone);
+                }
+            });
 
             // Build system tray
             let show_item = MenuItem::with_id(app, "show", "Ouvrir Shitpost", true, None::<&str>)?;
@@ -106,9 +127,12 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Always start with main window hidden - user opens via tray
-            if let Some(main_window) = app.get_webview_window("main") {
-                let _ = main_window.hide();
+            // Hide main window only when launched via autostart (Windows boot)
+            let is_autostart = std::env::args().any(|a| a == "--autostart");
+            if is_autostart {
+                if let Some(main_window) = app.get_webview_window("main") {
+                    let _ = main_window.hide();
+                }
             }
 
             Ok(())

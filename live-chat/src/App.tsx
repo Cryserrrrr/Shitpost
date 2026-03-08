@@ -3,11 +3,13 @@ import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { io, Socket } from "socket.io-client";
 import { useAuth } from "./contexts/AuthContext";
 import { useLang } from "./contexts/LangContext";
-import api, { getServerUrl, getApiUrl, setServerUrl } from "./services/api";
+import api, { getServerUrl, setServerUrl, refreshAuthToken } from "./services/api";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 import { Icons } from "./components/Icons";
 import Titlebar from "./components/Titlebar";
+import MemesTab from "./components/MemesTab";
+import HistoryTab from "./components/HistoryTab";
 
 
 const TIMEOUT_LIMITS = { min: 1000, maxImage: 10000, maxVideo: 30000, step: 500 } as const;
@@ -54,7 +56,8 @@ function MainChat() {
   const { user, token, logout } = useAuth();
   const { t, lang, setLang } = useLang();
   const navigate = useNavigate();
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const [socketConnected, setSocketConnected] = useState(false);
   const [friends, setFriends] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
@@ -67,7 +70,7 @@ function MainChat() {
   const [textPosition, setTextPosition] = useState<"on" | "around">("on");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [timeoutMs, setTimeoutMs] = useState(5000);
-  const [activeTab, setActiveTab] = useState<"media" | "social" | "settings">("media");
+  const [activeTab, setActiveTab] = useState<"media" | "memes" | "history" | "social" | "settings">("media");
   const [isDragging, setIsDragging] = useState(false);
   const [memeVolume, setMemeVolume] = useState(() => {
     const saved = localStorage.getItem("memeVolume");
@@ -87,6 +90,8 @@ function MainChat() {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const [previewMuted, setPreviewMuted] = useState(true);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const [globalDragging, setGlobalDragging] = useState(false);
+  const [dropProgress, setDropProgress] = useState<{ current: number; total: number } | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -103,49 +108,58 @@ function MainChat() {
     }
   }, []);
 
+  // Stable ref for logout so the socket useEffect never re-runs due to logout changing
+  const logoutRef = useRef(logout);
+  logoutRef.current = logout;
+
+  // Create socket once at mount (reads token from localStorage, not React state)
   useEffect(() => {
-    if (!token) return;
+    const initialToken = localStorage.getItem("token");
+    if (!initialToken) return;
 
     const serverUrl = getServerUrl();
-    console.log("[SOCKET] Attempting connection to", serverUrl, "with token:", token?.substring(0, 20) + "...");
     const newSocket = io(serverUrl, {
-      auth: { token },
+      auth: { token: initialToken },
       transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
     });
 
-    newSocket.on("connect", () => console.log("[SOCKET] Connected to server"));
-    let socketRefreshing = false;
-    newSocket.on("connect_error", async (err) => {
-      console.error("[SOCKET] Connection error:", err.message);
-      if (err.message.includes("Authentication error") && !socketRefreshing) {
-        socketRefreshing = true;
-        const rt = localStorage.getItem("refreshToken");
-        if (rt) {
-          try {
-            const resp = await fetch(`${getApiUrl()}/auth/refresh`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ refreshToken: rt }),
-            });
-            if (resp.ok) {
-              const data = await resp.json();
-              localStorage.setItem("token", data.token);
-              localStorage.setItem("refreshToken", data.refreshToken);
-              newSocket.auth = { token: data.token };
-              newSocket.connect();
-            } else {
-              logout();
-            }
-          } catch {
-            logout();
-          }
-        } else {
-          logout();
+    socketRef.current = newSocket;
+
+    newSocket.on("connect", () => {
+      setSocketConnected(true);
+    });
+
+    newSocket.on("disconnect", (reason) => {
+      setSocketConnected(false);
+      if (reason === "io server disconnect") {
+        const currentToken = localStorage.getItem("token");
+        if (currentToken) {
+          newSocket.auth = { token: currentToken };
+          newSocket.connect();
         }
-        socketRefreshing = false;
+      }
+    });
+
+    newSocket.on("connect_error", async (err) => {
+      setSocketConnected(false);
+      if (err.message.includes("Authentication error")) {
+        const newToken = await refreshAuthToken();
+        if (newToken) {
+          newSocket.auth = { token: newToken };
+          newSocket.connect();
+        } else {
+          logoutRef.current();
+        }
+      }
+    });
+
+    newSocket.on("reconnect_attempt", () => {
+      const currentToken = localStorage.getItem("token");
+      if (currentToken) {
+        newSocket.auth = { token: currentToken };
       }
     });
 
@@ -162,18 +176,62 @@ function MainChat() {
       });
     });
 
-    newSocket.on("media:sent", () => {
-      setSendStatus(t("media.sent"));
+    newSocket.on("media:sent", (data: { results: Array<{ targetId: string; delivered: boolean }> }) => {
+      const allDelivered = data.results?.every((r: { delivered: boolean }) => r.delivered) ?? true;
+      const offlineCount = data.results?.filter((r: { delivered: boolean }) => !r.delivered).length ?? 0;
+      if (allDelivered) {
+        setSendStatus(t("media.sent"));
+      } else {
+        setSendStatus(`${t("media.sent")} (${offlineCount} offline)`);
+      }
       setTimeout(() => setSendStatus(null), 2000);
     });
 
-    setSocket(newSocket);
     fetchData();
 
-    return () => {
-      newSocket.disconnect();
+    const refreshInterval = setInterval(async () => {
+      const newToken = await refreshAuthToken();
+      if (newToken && socketRef.current) {
+        socketRef.current.auth = { token: newToken };
+      }
+    }, 50 * 60 * 1000);
+
+    const handleOnline = () => {
+      if (socketRef.current && !socketRef.current.connected) {
+        const currentToken = localStorage.getItem("token");
+        if (currentToken) {
+          socketRef.current.auth = { token: currentToken };
+          socketRef.current.connect();
+        }
+      }
     };
-  }, [token, fetchData]);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        handleOnline();
+      }
+    };
+
+    window.addEventListener("online", handleOnline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      clearInterval(refreshInterval);
+      window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      newSocket.disconnect();
+      socketRef.current = null;
+    };
+  }, [fetchData]);
+
+  // Disconnect socket on logout
+  useEffect(() => {
+    if (!token && socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+      setSocketConnected(false);
+    }
+  }, [token]);
 
   // Load autostart status
   useEffect(() => {
@@ -306,14 +364,115 @@ function MainChat() {
     [loadMediaFile]
   );
 
+  // Global drag & drop via Tauri API
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"];
+    const VIDEO_EXTS = [".mp4", ".webm", ".mov", ".avi", ".mkv"];
+    const ALL_EXTS = [...IMAGE_EXTS, ...VIDEO_EXTS];
+    const isMedia = (p: string) => ALL_EXTS.some((ext) => p.toLowerCase().endsWith(ext));
+    const isVideo = (p: string) => VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(ext));
+
+    (async () => {
+      const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      unlisten = await getCurrentWebviewWindow().onDragDropEvent(async (event) => {
+        if (event.payload.type === "enter") {
+          setGlobalDragging(true);
+        } else if (event.payload.type === "leave") {
+          setGlobalDragging(false);
+        } else if (event.payload.type === "drop") {
+          setGlobalDragging(false);
+          const paths = event.payload.paths.filter(isMedia);
+          if (paths.length === 0) return;
+
+          const memesFolder = localStorage.getItem("memesFolder");
+          const { readFile } = await import("@tauri-apps/plugin-fs");
+          const { saveToMemesFolder, isFileDuplicateInMemes } = await import("./services/memesUtils");
+
+          // Save all files to memes folder with progress (skip duplicates)
+          if (memesFolder) {
+            setDropProgress({ current: 0, total: paths.length });
+            try {
+              for (let i = 0; i < paths.length; i++) {
+                const isDup = await isFileDuplicateInMemes(paths[i]);
+                if (!isDup) {
+                  const bytes = await readFile(paths[i]);
+                  const fileName = paths[i].split("\\").pop() || paths[i].split("/").pop() || `file_${i}`;
+                  await saveToMemesFolder(new Uint8Array(bytes), fileName);
+                }
+                setDropProgress({ current: i + 1, total: paths.length });
+              }
+            } catch (err) {
+              console.error("Failed to save to memes folder:", err);
+            }
+            setTimeout(() => setDropProgress(null), 800);
+          }
+
+          // If single file, load into shitpost
+          if (paths.length === 1) {
+            try {
+              const bytes = await readFile(paths[0]);
+              const u8 = new Uint8Array(bytes);
+              let binary = "";
+              for (let i = 0; i < u8.length; i++) binary += String.fromCharCode(u8[i]);
+              const base64 = btoa(binary);
+              const fileName = paths[0].split("\\").pop() || "";
+              const isVid = isVideo(fileName);
+              const ext = fileName.split(".").pop()?.toLowerCase() || "";
+              const mimeMap: Record<string, string> = {
+                jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+                webp: "image/webp", bmp: "image/bmp", avif: "image/avif",
+                mp4: "video/mp4", webm: "video/webm", mov: "video/mp4",
+                avi: "video/x-msvideo", mkv: "video/x-matroska",
+              };
+              const mime = mimeMap[ext] || (isVid ? "video/mp4" : "image/png");
+              const dataUrl = `data:${mime};base64,${base64}`;
+
+              setMediaData({ type: isVid ? "video" : "image", data: dataUrl, mimeType: mime });
+              setAudioData(null);
+              setTextData({ topText: "", bottomText: "" });
+              setPreviewMuted(true);
+              if (isVid) {
+                const v = document.createElement("video");
+                v.src = dataUrl;
+                v.onloadedmetadata = () => {
+                  const dur = v.duration;
+                  setVideoDuration(dur);
+                  setTrimStart(0);
+                  const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
+                  setTrimEnd(maxTrim);
+                  setTimeoutMs(Math.round(maxTrim * 1000));
+                };
+              } else {
+                setVideoDuration(0);
+                setTrimStart(0);
+                setTrimEnd(0);
+              }
+              setActiveTab("media");
+            } catch (err) {
+              console.error("Failed to load dropped file:", err);
+            }
+          } else {
+            setSendStatus(`${paths.length} shitposts ${t("memes.added").toLowerCase()}`);
+            setTimeout(() => setSendStatus(null), 2000);
+          }
+        }
+      });
+    })();
+
+    return () => { if (unlisten) unlisten(); };
+  }, [t]);
+
   const compressVideo = useCallback(async (dataUrl: string, start: number, end: number): Promise<string> => {
     const MAX_WIDTH = 1280;
     const MAX_HEIGHT = 720;
 
     return new Promise((resolve, reject) => {
       const video = document.createElement("video");
-      video.muted = true;
       video.playsInline = true;
+      video.muted = false;
+      video.volume = 1;
       video.src = dataUrl;
 
       video.onloadedmetadata = () => {
@@ -338,10 +497,10 @@ function MainChat() {
           const source = audioCtx.createMediaElementSource(video);
           const dest = audioCtx.createMediaStreamDestination();
           source.connect(dest);
-          source.connect(audioCtx.destination);
-          dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
-        } catch {
-          // No audio - continue without
+          dest.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
+          console.log("[COMPRESS] Audio tracks added:", dest.stream.getAudioTracks().length);
+        } catch (e) {
+          console.warn("[COMPRESS] No audio track captured:", e);
         }
 
         const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
@@ -397,7 +556,7 @@ function MainChat() {
   }, []);
 
   const handleSend = useCallback(async () => {
-    if (!socket?.connected || selectedTargets.length === 0 || !mediaData) return;
+    if (!socketRef.current?.connected || selectedTargets.length === 0 || !mediaData) return;
 
     const hasText = textData.topText || textData.bottomText;
     let mediaBuffer: string;
@@ -426,7 +585,7 @@ function MainChat() {
       mediaBuffer = mediaData.data.split(",")[1];
     }
 
-    socket.emit("broadcast_media", {
+    socketRef.current.emit("broadcast_media", {
       targetIds: selectedTargets,
       mediaType: mediaData.type,
       mediaBuffer,
@@ -436,7 +595,37 @@ function MainChat() {
       audioBuffer: mediaData.type === "image" ? audioData?.data : undefined,
       audioMimeType: mediaData.type === "image" ? audioData?.mimeType : undefined,
     });
-  }, [socket, selectedTargets, mediaData, textData, timeoutMs, audioData, createPreview, compressVideo, trimStart, trimEnd]);
+
+    // Save to history
+    const rawBase64 = mediaData.data.split(",")[1];
+    try {
+      const { addHistoryEntry } = await import("./services/historyDb");
+      const hasText = textData.topText || textData.bottomText;
+      await addHistoryEntry({
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: Date.now(),
+        senderName: user?.username || "me",
+        direction: "sent",
+        mediaType: mediaData.type,
+        mimeType: mediaData.mimeType,
+        mediaBase64: rawBase64,
+        textOverlay: hasText ? { ...textData, fontSize: textSize, position: textPosition } : undefined,
+      });
+    } catch (err) {
+      console.error("Failed to save to history:", err);
+    }
+
+    // Auto-save raw media to memes folder (skip duplicates)
+    try {
+      const { saveToMemesFolder } = await import("./services/memesUtils");
+      const bytes = Uint8Array.from(atob(rawBase64), (c) => c.charCodeAt(0));
+      const ext = mediaData.mimeType.split("/")[1]?.replace("jpeg", "jpg") || (mediaData.type === "video" ? "mp4" : "png");
+      const filename = `shitpost_${Date.now()}.${ext}`;
+      await saveToMemesFolder(bytes, filename);
+    } catch (err) {
+      console.error("Auto-save to memes folder failed:", err);
+    }
+  }, [selectedTargets, mediaData, textData, timeoutMs, audioData, createPreview, compressVideo, trimStart, trimEnd]);
 
   const handleTargetToggle = (id: string) => {
     setSelectedTargets((prev) =>
@@ -567,13 +756,47 @@ function MainChat() {
   const onlineCount = friends.filter((f) => onlineFriendIds.includes(f.id)).length;
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-dark)" }}>
+    <div
+      className="min-h-screen flex flex-col relative"
+      style={{ background: "var(--bg-dark)" }}
+    >
+      {/* Global drop overlay */}
+      {globalDragging && (
+        <div
+          className="absolute inset-0 z-[100] flex items-center justify-center pointer-events-none"
+          style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)" }}
+        >
+          <div className="flex flex-col items-center gap-4 animate-bounce-in">
+            <div className="rounded-2xl p-6" style={{ background: "var(--bg-card)", border: "3px dashed var(--accent-orange)", boxShadow: "var(--shadow-cartoon)" }}>
+              <Icons.Upload size={56} className="text-[var(--accent-orange)]" />
+            </div>
+            <p className="font-cartoon text-xl" style={{ color: "var(--accent-orange)" }}>
+              {t("memes.drop_here")}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Drop progress bar */}
+      {dropProgress && (
+        <div className="absolute top-0 left-0 right-0 z-[101]">
+          <div
+            className="h-1 transition-all duration-300 ease-out"
+            style={{
+              width: `${(dropProgress.current / dropProgress.total) * 100}%`,
+              background: "var(--accent-orange)",
+              boxShadow: "0 0 10px var(--accent-orange)",
+            }}
+          />
+        </div>
+      )}
+
       <Titlebar>
         {/* Connection status */}
         <span
           className="inline-block w-2 h-2 rounded-full"
-          style={{ background: socket?.connected ? "var(--accent-green)" : "var(--accent-red)" }}
-          title={socket?.connected ? t("general.connected") : t("friends.offline")}
+          style={{ background: socketConnected ? "var(--accent-green)" : "var(--accent-red)" }}
+          title={socketConnected ? t("general.connected") : t("friends.offline")}
         />
         {/* User */}
         <div className="flex items-center gap-1.5">
@@ -593,6 +816,8 @@ function MainChat() {
       <nav className="px-6 py-3 flex gap-2" style={{ background: "var(--bg-dark)" }}>
         {[
           { id: "media", label: "Shitpost", icon: Icons.Media, color: "var(--accent-pink)" },
+          { id: "memes", label: t("memes.title"), icon: Icons.Gallery, color: "var(--accent-orange)" },
+          { id: "history", label: t("history.title"), icon: Icons.Clock, color: "var(--accent-purple)" },
           { id: "social", label: t("sidebar.friends"), icon: Icons.Users, color: "var(--accent-cyan)" },
           { id: "settings", label: t("sidebar.settings"), icon: Icons.Settings, color: "var(--accent-yellow)" },
         ].map((tab) => (
@@ -868,9 +1093,9 @@ function MainChat() {
               <div
                 className={`flex flex-col items-center justify-center rounded-2xl overflow-hidden min-h-0 min-w-0 ${isDragging ? "dragging" : ""}`}
                 style={{ flex: "1 1 50%", background: "var(--bg-input)", border: "2px dashed var(--border-card)" }}
-                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={handleDrop}
+                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setIsDragging(true); }}
+                onDragLeave={(e) => { e.stopPropagation(); setIsDragging(false); }}
+                onDrop={(e) => { e.stopPropagation(); handleDrop(e); }}
               >
                 {previewUrl ? (
                   <div className="relative w-full" style={{ flex: "1 1 0%", minHeight: 0 }}>
@@ -954,9 +1179,6 @@ function MainChat() {
                     </div>
                     <p className="font-bold text-sm mb-1" style={{ color: "var(--text-gray)" }}>
                       {t("media.drop_here")}
-                    </p>
-                    <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-                      {t("media.or_click")}
                     </p>
                     <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="image/*,video/*" />
                     <button
@@ -1253,6 +1475,72 @@ function MainChat() {
                 </button>
               </div>
             </div>
+          )}
+
+          {activeTab === "memes" && (
+            <MemesTab
+              t={t}
+              onStatus={(msg) => {
+                setSendStatus(msg);
+                setTimeout(() => setSendStatus(null), 2000);
+              }}
+              onSelectMeme={(dataUrl, mimeType, isVideo) => {
+                setMediaData({ type: isVideo ? "video" : "image", data: dataUrl, mimeType });
+                setAudioData(null);
+                setTextData({ topText: "", bottomText: "" });
+                setPreviewMuted(true);
+                if (isVideo) {
+                  const v = document.createElement("video");
+                  v.src = dataUrl;
+                  v.onloadedmetadata = () => {
+                    const dur = v.duration;
+                    setVideoDuration(dur);
+                    setTrimStart(0);
+                    const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
+                    setTrimEnd(maxTrim);
+                    setTimeoutMs(Math.round(maxTrim * 1000));
+                  };
+                } else {
+                  setVideoDuration(0);
+                  setTrimStart(0);
+                  setTrimEnd(0);
+                }
+                setActiveTab("media");
+              }}
+            />
+          )}
+
+          {activeTab === "history" && (
+            <HistoryTab
+              t={t}
+              onStatus={(msg) => {
+                setSendStatus(msg);
+                setTimeout(() => setSendStatus(null), 2000);
+              }}
+              onSelectMeme={(dataUrl, mimeType, isVideo) => {
+                setMediaData({ type: isVideo ? "video" : "image", data: dataUrl, mimeType });
+                setAudioData(null);
+                setTextData({ topText: "", bottomText: "" });
+                setPreviewMuted(true);
+                if (isVideo) {
+                  const v = document.createElement("video");
+                  v.src = dataUrl;
+                  v.onloadedmetadata = () => {
+                    const dur = v.duration;
+                    setVideoDuration(dur);
+                    setTrimStart(0);
+                    const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
+                    setTrimEnd(maxTrim);
+                    setTimeoutMs(Math.round(maxTrim * 1000));
+                  };
+                } else {
+                  setVideoDuration(0);
+                  setTrimStart(0);
+                  setTrimEnd(0);
+                }
+                setActiveTab("media");
+              }}
+            />
           )}
 
           {activeTab === "social" && (
