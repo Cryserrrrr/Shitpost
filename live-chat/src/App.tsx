@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { io, Socket } from "socket.io-client";
+import fixWebmDuration from "fix-webm-duration";
 import { useAuth } from "./contexts/AuthContext";
 import { useLang } from "./contexts/LangContext";
 import api, { getServerUrl, setServerUrl, refreshAuthToken } from "./services/api";
@@ -10,6 +11,7 @@ import { Icons } from "./components/Icons";
 import Titlebar from "./components/Titlebar";
 import MemesTab from "./components/MemesTab";
 import HistoryTab from "./components/HistoryTab";
+import Updater from "./components/Updater";
 
 
 const TIMEOUT_LIMITS = { min: 1000, maxImage: 10000, maxVideo: 30000, step: 500 } as const;
@@ -94,10 +96,12 @@ function MainChat() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [segments, setSegments] = useState<{ start: number; end: number }[]>([]);
   const [activeSegment, setActiveSegment] = useState(0);
+  const [loopCount, setLoopCount] = useState(1);
   const segmentPlayRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const [previewMuted, setPreviewMuted] = useState(true);
+  const [videoMuteOriginal, setVideoMuteOriginal] = useState(false);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const [playheadTime, setPlayheadTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
@@ -386,14 +390,16 @@ function MainChat() {
     [textSize]
   );
 
+  const isGif = mediaData?.mimeType === "image/gif";
+
   useEffect(() => {
     if (!mediaData) { setPreviewUrl(null); return; }
-    if (mediaData.type === "image" && textPosition === "on") {
+    if (mediaData.type === "image" && textPosition === "on" && !isGif) {
       createPreview(mediaData, textData).then(setPreviewUrl);
     } else {
       setPreviewUrl(mediaData.data);
     }
-  }, [mediaData, textData, textPosition, textSize, createPreview]);
+  }, [mediaData, textData, textPosition, textSize, createPreview, isGif]);
 
   // Sync preview video volume with settings
   useEffect(() => {
@@ -406,6 +412,16 @@ function MainChat() {
     setTimeoutMs((prev) => Math.min(prev, max));
   }, [mediaData?.type]);
 
+  // Clamp audio overlay trim when video segments/loop change
+  useEffect(() => {
+    if (!audioData || !audioDuration) return;
+    const maxClip = mediaData?.type === "video" ? totalSegDuration(segments) * loopCount : timeoutMs / 1000;
+    if (maxClip > 0) {
+      setAudioTrimEnd((prev) => Math.min(prev, maxClip, audioDuration));
+      setAudioTrimStart((prev) => Math.min(prev, Math.min(maxClip, audioDuration) - 0.5));
+    }
+  }, [segments, loopCount, mediaData?.type, timeoutMs, audioData, audioDuration]);
+
   const loadMediaFile = useCallback((file: File, dataUrl: string) => {
     const ext = file.name.split(".").pop()?.toLowerCase() || "";
     const VIDEO_FORCE_EXTS = ["webm", "mp4", "mov", "avi", "mkv"];
@@ -415,6 +431,8 @@ function MainChat() {
     setMediaData({ type, data: dataUrl, mimeType: file.type });
     setAudioData(null);
     setPreviewMuted(!isAudio);
+    setLoopCount(1);
+    setVideoMuteOriginal(false);
     if (isVideo || isAudio) {
       const el = document.createElement(isVideo ? "video" : "audio");
       el.src = dataUrl;
@@ -469,6 +487,7 @@ function MainChat() {
         const result = re.target?.result as string;
         const base64 = result.split(",")[1];
         setAudioData({ data: base64, mimeType: file.type, name: file.name });
+        setAudioOverlayMuted(previewMuted);
         // Decode to get duration
         try {
           const buf = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer;
@@ -478,13 +497,14 @@ function MainChat() {
           ctx.close();
           setAudioDuration(dur);
           setAudioTrimStart(0);
-          setAudioTrimEnd(Math.min(dur, timeoutMs / 1000));
+          const maxClip = mediaData?.type === "video" ? totalSegDuration(segments) * loopCount : timeoutMs / 1000;
+          setAudioTrimEnd(Math.min(dur, maxClip));
         } catch { /* fallback: no trim */ }
       };
       reader.readAsDataURL(file);
       if (audioInputRef.current) audioInputRef.current.value = "";
     },
-    [t, timeoutMs],
+    [t, timeoutMs, mediaData?.type, segments, loopCount, previewMuted],
   );
 
   const handleDrop = useCallback(
@@ -650,7 +670,7 @@ function MainChat() {
     return () => { if (unlisten) unlisten(); };
   }, [t]);
 
-  const compressVideo = useCallback(async (dataUrl: string, segs: { start: number; end: number }[]): Promise<string> => {
+  const compressVideo = useCallback(async (dataUrl: string, segs: { start: number; end: number }[], muteOriginal = false): Promise<string> => {
     const MAX_WIDTH = 1280;
     const MAX_HEIGHT = 720;
 
@@ -672,7 +692,7 @@ function MainChat() {
 
       const video = document.createElement("video");
       video.playsInline = true;
-      video.muted = false;
+      video.muted = true;
       video.volume = 1;
       video.src = objectUrl;
 
@@ -694,14 +714,18 @@ function MainChat() {
 
         const stream = canvas.captureStream(30);
         let audioCtx: AudioContext | null = null;
-        try {
-          audioCtx = new AudioContext();
-          const source = audioCtx.createMediaElementSource(video);
-          const dest = audioCtx.createMediaStreamDestination();
-          source.connect(dest);
-          dest.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
-        } catch (e) {
-          console.warn("[COMPRESS] No audio track captured:", e);
+        if (!muteOriginal) {
+          try {
+            audioCtx = new AudioContext();
+            const source = audioCtx.createMediaElementSource(video);
+            const dest = audioCtx.createMediaStreamDestination();
+            source.connect(dest);
+            dest.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
+            // createMediaElementSource takes over audio routing, safe to unmute
+            video.muted = false;
+          } catch (e) {
+            console.warn("[COMPRESS] No audio track captured:", e);
+          }
         }
 
         const bitrate = totalDur > 20 ? 1_000_000 : 2_000_000;
@@ -716,12 +740,15 @@ function MainChat() {
         recorder.onstop = () => {
           cleanup();
           audioCtx?.close().catch(() => {});
-          const blob = new Blob(chunks, { type: "video/webm" });
+          const rawBlob = new Blob(chunks, { type: "video/webm" });
           chunks.length = 0;
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(new Error("Failed to read compressed video"));
-          reader.readAsDataURL(blob);
+          // Fix WebM duration metadata (MediaRecorder doesn't write it)
+          fixWebmDuration(rawBlob, totalDur * 1000).then((fixedBlob) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(new Error("Failed to read compressed video"));
+            reader.readAsDataURL(fixedBlob);
+          });
         };
 
         recorder.onerror = () => { cleanup(); audioCtx?.close().catch(() => {}); reject(new Error("MediaRecorder error")); };
@@ -772,7 +799,7 @@ function MainChat() {
     const response = await fetch(dataUrl);
     const arrayBuffer = await response.arrayBuffer();
     const audioCtx = new AudioContext();
-    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+    const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
     const sampleRate = decoded.sampleRate;
     const numChannels = decoded.numberOfChannels;
 
@@ -839,16 +866,14 @@ function MainChat() {
     let mediaBuffer: string;
     let mimeType = mediaData.mimeType;
 
-    if (mediaData.type === "image" && hasText && textPosition === "on") {
-      const rendered = await createPreview(mediaData, textData);
-      mediaBuffer = rendered.split(",")[1];
-      mimeType = "image/png";
-    } else if (mediaData.type === "video") {
-      // Compress video before sending
+    if (mediaData.type === "video") {
+      // Compress video before sending — repeat segments for loop
+      const loopedSegments: { start: number; end: number }[] = [];
+      for (let l = 0; l < loopCount; l++) loopedSegments.push(...segments);
       setCompressing(true);
       setCompressProgress(0);
       try {
-        const compressed = await compressVideo(mediaData.data, segments);
+        const compressed = await compressVideo(mediaData.data, loopedSegments, videoMuteOriginal);
         mediaBuffer = compressed.split(",")[1];
         mimeType = "video/webm";
       } catch (err) {
@@ -859,26 +884,31 @@ function MainChat() {
       }
       setCompressing(false);
     } else if (mediaData.type === "audio") {
-      // Trim audio before sending
-      setCompressing(true);
-      try {
-        const trimmed = await trimAudio(mediaData.data, segments);
-        mediaBuffer = trimmed.split(",")[1];
-        mimeType = "audio/wav";
-      } catch (err) {
-        console.error("Audio trim failed:", err);
-        setSendStatus(t("media.compress_error"));
+      // Trim audio before sending — repeat segments for loop
+      const loopedAudioSegs: { start: number; end: number }[] = [];
+      for (let l = 0; l < loopCount; l++) loopedAudioSegs.push(...segments);
+      if (loopedAudioSegs.length > 0) {
+        setCompressing(true);
+        try {
+          const trimmed = await trimAudio(mediaData.data, loopedAudioSegs);
+          mediaBuffer = trimmed.split(",")[1];
+          mimeType = "audio/wav";
+        } catch (err) {
+          console.error("Audio trim failed:", err);
+          // Fallback: send raw audio without trimming
+          mediaBuffer = mediaData.data.split(",")[1];
+        }
         setCompressing(false);
-        return;
+      } else {
+        mediaBuffer = mediaData.data.split(",")[1];
       }
-      setCompressing(false);
     } else {
       mediaBuffer = mediaData.data.split(",")[1];
     }
 
-    // Trim audio overlay if present (for images)
+    // Trim audio overlay if present (for images or videos)
     let trimmedAudioOverlay: string | undefined;
-    if (mediaData.type === "image" && audioData) {
+    if ((mediaData.type === "image" || mediaData.type === "video") && audioData) {
       try {
         const audioDataUrl = `data:${audioData.mimeType};base64,${audioData.data}`;
         const trimmed = await trimAudio(audioDataUrl, [{ start: audioTrimStart, end: audioTrimEnd }]);
@@ -898,8 +928,8 @@ function MainChat() {
       mediaType: mediaData.type,
       mediaBuffer,
       mimeType,
-      duration: timeoutMs,
-      textOverlay: hasText && (textPosition === "around" || mediaData.type === "video") ? { ...textData, fontSize: textSize, position: textPosition } : undefined,
+      duration: (mediaData.type === "video" || mediaData.type === "audio") ? Math.round(totalSegDuration(segments) * loopCount * 1000) : timeoutMs,
+      textOverlay: hasText ? { ...textData, fontSize: textSize, position: textPosition } : undefined,
       audioBuffer: trimmedAudioOverlay,
       audioMimeType: trimmedAudioOverlay ? "audio/wav" : undefined,
     });
@@ -933,7 +963,7 @@ function MainChat() {
     } catch (err) {
       console.error("Auto-save to memes folder failed:", err);
     }
-  }, [selectedTargets, mediaData, textData, timeoutMs, audioData, audioTrimStart, audioTrimEnd, createPreview, compressVideo, trimAudio, segments]);
+  }, [selectedTargets, mediaData, textData, timeoutMs, audioData, audioTrimStart, audioTrimEnd, createPreview, compressVideo, trimAudio, segments, loopCount, videoMuteOriginal]);
 
   const handleTargetToggle = (id: string) => {
     setSelectedTargets((prev) =>
@@ -1795,7 +1825,7 @@ function MainChat() {
                         }}
                         src={previewUrl}
                         autoPlay
-                        muted={previewMuted}
+                        muted={previewMuted || videoMuteOriginal}
                         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
                         onLoadedMetadata={() => {
                           if (previewVideoRef.current && segments.length > 0) {
@@ -1817,8 +1847,8 @@ function MainChat() {
                         }}
                       />
                     )}
-                    {/* Text overlay preview (for videos, or images in "around" mode) */}
-                    {(mediaData?.type === "video" || textPosition === "around") && (textData.topText || textData.bottomText) && (
+                    {/* Text overlay preview — "on" mode (absolute on video/gif) */}
+                    {(mediaData?.type === "video" || isGif) && textPosition === "on" && (textData.topText || textData.bottomText) && (
                       <>
                         {textData.topText && (
                           <div style={{
@@ -1844,30 +1874,91 @@ function MainChat() {
                         )}
                       </>
                     )}
+                    {/* Text overlay preview — "around" mode (outside video) */}
+                    {(mediaData?.type === "video" || mediaData?.type === "image") && textPosition === "around" && (textData.topText || textData.bottomText) && (
+                      <>
+                        {textData.topText && (
+                          <div style={{
+                            position: "absolute", top: 4, left: 0, right: 0, textAlign: "center", zIndex: 1,
+                            fontSize: textSize * 0.35, fontWeight: 900, fontFamily: "'Impact', 'Charcoal', sans-serif",
+                            color: "#fff", letterSpacing: 1, whiteSpace: "pre-line",
+                            textShadow: "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000",
+                            pointerEvents: "none", background: "rgba(0,0,0,0.5)", padding: "4px 8px", borderRadius: 8,
+                          }}>
+                            {textData.topText.toUpperCase()}
+                          </div>
+                        )}
+                        {textData.bottomText && (
+                          <div style={{
+                            position: "absolute", bottom: 4, left: 0, right: 0, textAlign: "center", zIndex: 1,
+                            fontSize: textSize * 0.35, fontWeight: 900, fontFamily: "'Impact', 'Charcoal', sans-serif",
+                            color: "#fff", letterSpacing: 1, whiteSpace: "pre-line",
+                            textShadow: "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000",
+                            pointerEvents: "none", background: "rgba(0,0,0,0.5)", padding: "4px 8px", borderRadius: 8,
+                          }}>
+                            {textData.bottomText.toUpperCase()}
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {/* Audio overlay for video */}
+                    {mediaData?.type === "video" && audioData && (
+                      <audio
+                        ref={audioOverlayRef}
+                        src={`data:${audioData.mimeType};base64,${audioData.data}`}
+                        autoPlay
+                        loop
+                        style={{ display: "none" }}
+                        onLoadedMetadata={(e) => {
+                          const el = e.currentTarget;
+                          el.currentTime = audioTrimStart;
+                          el.volume = audioOverlayMuted ? 0 : memeVolume / 100;
+                        }}
+                        onTimeUpdate={(e) => {
+                          const el = e.currentTarget;
+                          if (el.currentTime >= audioTrimEnd || el.currentTime < audioTrimStart - 0.5) {
+                            el.currentTime = audioTrimStart;
+                          }
+                        }}
+                      />
+                    )}
+                    {/* Single mute button — controls original audio OR audio overlay */}
                     {(mediaData?.type === "video" || mediaData?.type === "audio") && (
                       <button
                         onClick={() => {
-                          setPreviewMuted((m) => {
-                            const next = !m;
-                            const el = previewVideoRef.current;
-                            if (el) {
-                              if (mediaData?.type === "audio") {
-                                el.volume = next ? 0 : memeVolume / 100;
-                              } else {
-                                (el as HTMLVideoElement).muted = next;
+                          if (mediaData?.type === "video" && videoMuteOriginal && audioData) {
+                            // Control audio overlay
+                            setAudioOverlayMuted((m) => {
+                              const next = !m;
+                              if (audioOverlayRef.current) audioOverlayRef.current.volume = next ? 0 : memeVolume / 100;
+                              return next;
+                            });
+                          } else {
+                            // Control original audio
+                            setPreviewMuted((m) => {
+                              const next = !m;
+                              const el = previewVideoRef.current;
+                              if (el) {
+                                if (mediaData?.type === "audio") {
+                                  el.volume = next ? 0 : memeVolume / 100;
+                                } else {
+                                  (el as HTMLVideoElement).muted = next;
+                                }
                               }
-                            }
-                            return next;
-                          });
+                              return next;
+                            });
+                          }
                         }}
                         className="absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center"
                         style={{ background: "rgba(0,0,0,0.7)", border: "2px solid rgba(255,255,255,0.3)", zIndex: 2, pointerEvents: "auto", cursor: "pointer" }}
                       >
-                        {previewMuted ? <Icons.Muted size={14} className="text-white" /> : <Icons.Volume size={14} className="text-white" />}
+                        {(mediaData?.type === "video" && videoMuteOriginal && audioData ? audioOverlayMuted : previewMuted)
+                          ? <Icons.Muted size={14} className="text-white" />
+                          : <Icons.Volume size={14} className="text-white" />}
                       </button>
                     )}
                     <button
-                      onClick={() => { setMediaData(null); setAudioData(null); setTextData({ topText: "", bottomText: "" }); setPreviewMuted(true); setAudioOverlayMuted(false); }}
+                      onClick={() => { setMediaData(null); setAudioData(null); setTextData({ topText: "", bottomText: "" }); setPreviewMuted(true); setAudioOverlayMuted(false); setVideoMuteOriginal(false); }}
                       className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center"
                       style={{ background: "var(--accent-red)", border: "2px solid #000", boxShadow: "var(--shadow-cartoon-sm)", zIndex: 2 }}
                     >
@@ -1975,17 +2066,47 @@ function MainChat() {
                 )}
 
                 {/* Audio */}
-                {mediaData?.type === "image" && (
+                {(mediaData?.type === "image" || mediaData?.type === "video") && (
                   <div>
+                    {/* Mute original video audio */}
+                    {mediaData?.type === "video" && (
+                      <button
+                        onClick={() => {
+                          const next = !videoMuteOriginal;
+                          setVideoMuteOriginal(next);
+                          if (previewVideoRef.current) (previewVideoRef.current as HTMLVideoElement).muted = next;
+                          if (next) {
+                            // Muting original → carry over mute state to audio overlay
+                            setAudioOverlayMuted(previewMuted);
+                            if (audioOverlayRef.current) audioOverlayRef.current.volume = previewMuted ? 0 : memeVolume / 100;
+                          } else {
+                            // Re-enable original audio → remove custom audio, restore video mute state
+                            if (previewVideoRef.current) (previewVideoRef.current as HTMLVideoElement).muted = previewMuted;
+                            setAudioData(null); setAudioDuration(0); setAudioTrimStart(0); setAudioTrimEnd(0); setAudioOverlayMuted(false);
+                          }
+                        }}
+                        className="cartoon-btn w-full px-3 py-1.5 text-xs flex items-center justify-center gap-1.5 mb-1"
+                        style={{
+                          background: videoMuteOriginal ? "var(--accent-red)" : "var(--bg-input)",
+                          color: videoMuteOriginal ? "#fff" : "var(--text-muted)",
+                        }}
+                      >
+                        {videoMuteOriginal ? <Icons.Muted size={13} /> : <Icons.Volume size={13} />}
+                        {videoMuteOriginal ? t("media.muted_original") : t("media.mute_original")}
+                      </button>
+                    )}
                     <input ref={audioInputRef} type="file" className="hidden" onChange={handleAudioUpload} accept="audio/*" />
-                    <button
-                      onClick={() => audioInputRef.current?.click()}
-                      className="cartoon-btn w-full px-3 py-1.5 text-xs flex items-center justify-center gap-1.5"
-                      style={{ background: "var(--accent-purple)", color: "#fff" }}
-                    >
-                      <Icons.Music size={13} />
-                      {audioData ? audioData.name : t("media.choose_audio")}
-                    </button>
+                    {/* Show add audio button: always for images, only when original muted for videos */}
+                    {(mediaData?.type === "image" || videoMuteOriginal) && (
+                      <button
+                        onClick={() => audioInputRef.current?.click()}
+                        className="cartoon-btn w-full px-3 py-1.5 text-xs flex items-center justify-center gap-1.5"
+                        style={{ background: "var(--accent-purple)", color: "#fff" }}
+                      >
+                        <Icons.Music size={13} />
+                        {audioData ? audioData.name : t("media.choose_audio")}
+                      </button>
+                    )}
                     {audioData && (
                       <>
                         <button
@@ -2062,7 +2183,7 @@ function MainChat() {
                                 const mid = (audioTrimStart + audioTrimEnd) / 2;
                                 const side: "left" | "right" = clickTime < mid ? "left" : "right";
 
-                                const maxClip = timeoutMs / 1000;
+                                const maxClip = mediaData?.type === "video" ? totalSegDuration(segments) * loopCount : timeoutMs / 1000;
                                 const onMove = (ev: MouseEvent) => {
                                   const t = pxToTime(ev.clientX - rect.left);
                                   if (side === "left") {
@@ -2099,12 +2220,47 @@ function MainChat() {
                       <label className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
                         <Icons.Clock size={13} /> DECOUPE
                       </label>
-                      <span
-                        className="cartoon-badge text-xs"
-                        style={{ background: segColor(activeSegment), color: "#000", borderColor: "#000", padding: "1px 8px" }}
-                      >
-                        {totalSegDuration(segments).toFixed(1)}s total
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {/* Loop control — only for short videos */}
+                        {mediaData?.type === "video" && totalSegDuration(segments) < TIMEOUT_LIMITS.maxVideo / 1000 && (() => {
+                          const segDur = totalSegDuration(segments);
+                          const maxLoops = Math.max(1, Math.floor((TIMEOUT_LIMITS.maxVideo / 1000) / segDur));
+                          return maxLoops > 1 ? (
+                            <div className="relative flex items-center">
+                              <select
+                                value={loopCount}
+                                onChange={(e) => setLoopCount(Number(e.target.value))}
+                                className="font-bold cursor-pointer appearance-none"
+                                style={{
+                                  fontSize: 11,
+                                  padding: "3px 22px 3px 8px",
+                                  background: "var(--accent-cyan)",
+                                  color: "#000",
+                                  border: "2px solid #000",
+                                  borderRadius: 10,
+                                  outline: "none",
+                                  boxShadow: "var(--shadow-cartoon-sm)",
+                                  WebkitAppearance: "none",
+                                  MozAppearance: "none",
+                                }}
+                              >
+                                {Array.from({ length: maxLoops }, (_, i) => i + 1).map((n) => (
+                                  <option key={n} value={n} style={{ background: "var(--bg-card)", color: "var(--text-white)" }}>{n}×</option>
+                                ))}
+                              </select>
+                              <svg width={10} height={10} viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", right: 6, pointerEvents: "none" }}>
+                                <path d="M6 9l6 6 6-6" />
+                              </svg>
+                            </div>
+                          ) : null;
+                        })()}
+                        <span
+                          className="cartoon-badge text-xs"
+                          style={{ background: segColor(activeSegment), color: "#000", borderColor: "#000", padding: "1px 8px" }}
+                        >
+                          {(totalSegDuration(segments) * loopCount).toFixed(1)}s total
+                        </span>
+                      </div>
                     </div>
 
                     {/* Segment badges */}
@@ -3168,19 +3324,22 @@ function App() {
   const { user } = useAuth();
 
   return (
-    <Routes>
-      <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
-      <Route path="/register" element={user ? <Navigate to="/" replace /> : <RegisterPage />} />
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <MainChat />
-          </ProtectedRoute>
-        }
-      />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <>
+      <Updater />
+      <Routes>
+        <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
+        <Route path="/register" element={user ? <Navigate to="/" replace /> : <RegisterPage />} />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <MainChat />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </>
   );
 }
 

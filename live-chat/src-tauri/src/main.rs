@@ -116,6 +116,8 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![get_autostart, set_autostart, set_overlay_interactive, list_monitors, set_overlay_monitor])
         .setup(|app| {
             // Setup overlay window

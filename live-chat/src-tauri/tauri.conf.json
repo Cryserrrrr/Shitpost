@@ -55,6 +55,12 @@
     "withGlobalTauri": true
   },
   "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Cryserrrrr/Shitpost/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDExOTNDRjlCMzc0MEJFNjQKUldSa3ZrQTNtOCtURVltbEx6NTFvRXRwQ1BMK2hOWDFFQTFDSzl5aUFzb1JHTnVBY1RhZ05pcU8K"
+    },
     "deep-link": {
       "desktop": {
         "schemes": ["shitpost"]
@@ -63,7 +69,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "targets": "nsis",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

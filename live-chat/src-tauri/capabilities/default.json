@@ -56,6 +56,8 @@
       "identifier": "fs:allow-remove",
       "allow": [{ "path": "**" }]
     },
-    "deep-link:default"
+    "deep-link:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

@@ -77,6 +77,8 @@ const translations = {
     "media.choose_video": "Choisir une video",
     "media.choose_audio": "Ajouter un son",
     "media.remove_audio": "Retirer le son",
+    "media.mute_original": "Retirer le son original",
+    "media.muted_original": "Son original retire",
     "media.top_text": "Texte du haut",
     "media.bottom_text": "Texte du bas",
     "media.text_size": "Taille du texte",
@@ -154,6 +156,16 @@ const translations = {
     // Overlay
     "overlay.from": "de",
     "overlay.waiting_auth": "En attente d'authentification...",
+
+    // Updater
+    "updater.checking": "Recherche de mises a jour...",
+    "updater.available": "Mise a jour disponible !",
+    "updater.downloading": "Telechargement...",
+    "updater.installing": "Installation...",
+    "updater.restart": "Redemarrer",
+    "updater.later": "Plus tard",
+    "updater.up_to_date": "Tu es a jour !",
+    "updater.error": "Erreur de mise a jour",
 
     // General
     "general.cancel": "Annuler",
@@ -246,6 +258,8 @@ const translations = {
     "media.choose_video": "Choose video",
     "media.choose_audio": "Add audio",
     "media.remove_audio": "Remove audio",
+    "media.mute_original": "Remove original audio",
+    "media.muted_original": "Original audio removed",
     "media.top_text": "Top text",
     "media.bottom_text": "Bottom text",
     "media.text_size": "Text size",
@@ -323,6 +337,16 @@ const translations = {
     // Overlay
     "overlay.from": "from",
     "overlay.waiting_auth": "Waiting for authentication...",
+
+    // Updater
+    "updater.checking": "Checking for updates...",
+    "updater.available": "Update available!",
+    "updater.downloading": "Downloading...",
+    "updater.installing": "Installing...",
+    "updater.restart": "Restart",
+    "updater.later": "Later",
+    "updater.up_to_date": "You're up to date!",
+    "updater.error": "Update error",
 
     // General
     "general.cancel": "Cancel",
