@@ -53,10 +53,11 @@ async function isDuplicate(folder: string, newBytes: Uint8Array): Promise<boolea
 export async function saveToMemesFolder(
   bytes: Uint8Array,
   filename: string,
+  force = false,
 ): Promise<boolean> {
   const folder = localStorage.getItem("memesFolder");
   if (!folder) return false;
-  if (localStorage.getItem("memesAutoSave") !== "true") return false;
+  if (!force && localStorage.getItem("memesAutoSave") !== "true") return false;
 
   try {
     const dirExists = await exists(folder);

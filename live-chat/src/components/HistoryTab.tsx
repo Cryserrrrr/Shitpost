@@ -76,7 +76,7 @@ export default function HistoryTab({ t, onStatus, onSelectMeme }: HistoryTabProp
     const ext = entry.mimeType.split("/")[1]?.replace("jpeg", "jpg") || (entry.mediaType === "video" ? "mp4" : "png");
     const sender = entry.senderName.replace(/[^a-zA-Z0-9]/g, "_");
     const filename = `${sender}_${entry.timestamp}.${ext}`;
-    const saved = await saveToMemesFolder(bytes, filename);
+    const saved = await saveToMemesFolder(bytes, filename, true);
     onStatus(saved ? t("memes.added") : t("history.already_saved"));
   };
 
