@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
-import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n";
 import { getServerUrl } from "./services/api";
 import "./overlay.css";
