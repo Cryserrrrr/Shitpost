@@ -22,14 +22,6 @@ interface MediaData {
 
 type AnimState = "entering" | "visible" | "exiting" | "hidden";
 
-function base64ToBlob(base64: string, mimeType: string): Blob {
-  const byteChars = atob(base64);
-  const byteNumbers = new Array(byteChars.length);
-  for (let i = 0; i < byteChars.length; i++) {
-    byteNumbers[i] = byteChars.charCodeAt(i);
-  }
-  return new Blob([new Uint8Array(byteNumbers)], { type: mimeType });
-}
 
 function Overlay() {
   const [media, setMedia] = useState<MediaData | null>(null);
@@ -43,6 +35,9 @@ function Overlay() {
   const enterTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioBlobUrlRef = useRef<string | null>(null);
   const mediaBlobUrlRef = useRef<string | null>(null);
+  const dynamicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioSrcNodeRef = useRef<AudioBufferSourceNode | null>(null);
 
   const cleanup = useCallback(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -60,6 +55,19 @@ function Overlay() {
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = "";
+    }
+    if (dynamicAudioRef.current) {
+      dynamicAudioRef.current.pause();
+      dynamicAudioRef.current.src = "";
+      dynamicAudioRef.current = null;
+    }
+    if (audioSrcNodeRef.current) {
+      try { audioSrcNodeRef.current.stop(); } catch {}
+      audioSrcNodeRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch {}
+      audioCtxRef.current = null;
     }
   }, []);
 
@@ -120,72 +128,68 @@ function Overlay() {
       const volume = Math.min(Math.max(Number(localStorage.getItem("memeVolume") ?? 100), 0), 100) / 100;
       console.log("[MEDIA] Type:", data.mediaType, "| MIME:", data.mimeType, "| Volume:", volume, "| Buffer size:", data.mediaBuffer?.length);
 
+      // Helper: play audio — try ref element, then new Audio(), then AudioContext
+      const playAudioBlob = async (base64: string, mime: string) => {
+        const dataUrl = `data:${mime};base64,${base64}`;
+
+        // Method 1: existing <audio> element with autoPlay
+        if (audioRef.current) {
+          try {
+            audioRef.current.src = dataUrl;
+            audioRef.current.volume = volume;
+            await audioRef.current.play();
+            return;
+          } catch (e) {
+            console.warn("[AUDIO] ref play failed:", e);
+          }
+        }
+
+        // Method 2: dynamic new Audio()
+        try {
+          const a = new Audio(dataUrl);
+          a.volume = volume;
+          dynamicAudioRef.current = a;
+          await a.play();
+          return;
+        } catch (e) {
+          console.warn("[AUDIO] new Audio() failed:", e);
+          dynamicAudioRef.current = null;
+        }
+
+        // Method 3: AudioContext
+        try {
+          const buf = Uint8Array.from(atob(base64), c => c.charCodeAt(0)).buffer;
+          const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          if (ctx.state === "suspended") await ctx.resume();
+          const decoded = await ctx.decodeAudioData(buf.slice(0));
+          const src = ctx.createBufferSource();
+          const gain = ctx.createGain();
+          gain.gain.value = volume;
+          src.buffer = decoded;
+          src.connect(gain);
+          gain.connect(ctx.destination);
+          src.start(0);
+          audioSrcNodeRef.current = src;
+          audioCtxRef.current = ctx;
+          src.onended = () => {
+            audioSrcNodeRef.current = null;
+            try { ctx.close(); } catch {}
+            audioCtxRef.current = null;
+          };
+          return;
+        } catch (e) {
+          console.error("[AUDIO] All methods failed:", e);
+        }
+      };
+
       // For standalone audio: play the media itself
       if (data.mediaType === "audio" && data.mediaBuffer) {
-        try {
-          const audioBlob = base64ToBlob(data.mediaBuffer, data.mimeType);
-          const audioUrl = URL.createObjectURL(audioBlob);
-          audioBlobUrlRef.current = audioUrl;
-
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          const response = await fetch(audioUrl);
-          const arrayBuffer = await response.arrayBuffer();
-          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-          const source = audioCtx.createBufferSource();
-          const gainNode = audioCtx.createGain();
-          gainNode.gain.value = volume;
-          source.buffer = audioBuffer;
-          source.connect(gainNode);
-          gainNode.connect(audioCtx.destination);
-          source.start(0);
-
-          source.onended = () => { source.stop(); audioCtx.close(); };
-        } catch (err) {
-          console.error("[AUDIO] Standalone audio playback failed:", err);
-          if (audioRef.current && audioBlobUrlRef.current) {
-            audioRef.current.src = audioBlobUrlRef.current;
-            audioRef.current.volume = volume;
-            audioRef.current.play().catch(() => {});
-          }
-        }
+        await playAudioBlob(data.mediaBuffer, data.mimeType);
       }
 
-      // For images with attached audio
+      // For images/videos with attached audio
       if (data.audioBuffer && data.audioMimeType) {
-        try {
-          const audioBlob = base64ToBlob(data.audioBuffer, data.audioMimeType);
-          const audioUrl = URL.createObjectURL(audioBlob);
-          audioBlobUrlRef.current = audioUrl;
-
-          // Try AudioContext first (bypasses autoplay restrictions)
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          const response = await fetch(audioUrl);
-          const arrayBuffer = await response.arrayBuffer();
-          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-          const source = audioCtx.createBufferSource();
-          const gainNode = audioCtx.createGain();
-          gainNode.gain.value = volume;
-          source.buffer = audioBuffer;
-          source.connect(gainNode);
-          gainNode.connect(audioCtx.destination);
-          source.start(0);
-          console.log("[AUDIO] Playing via AudioContext, volume:", volume);
-
-          // Clean up AudioContext when media ends
-          const closeCtx = () => {
-            source.stop();
-            audioCtx.close();
-          };
-          source.onended = closeCtx;
-        } catch (err) {
-          console.error("[AUDIO] AudioContext failed, falling back to <audio>:", err);
-          // Fallback to <audio> element
-          if (audioRef.current) {
-            audioRef.current.src = audioBlobUrlRef.current!;
-            audioRef.current.volume = volume;
-            audioRef.current.play().catch((e) => console.error("[AUDIO] play() failed:", e));
-          }
-        }
+        await playAudioBlob(data.audioBuffer, data.audioMimeType);
       }
 
       const duration = Math.min(Math.max(data.duration || 5000, 1000), 30000);
@@ -337,8 +341,8 @@ function Overlay() {
 
   return (
     <div className="overlay-container">
-      {/* Audio element for image music */}
-      <audio ref={audioRef} preload="auto" />
+      {/* Audio element for overlay music */}
+      <audio ref={audioRef} preload="auto" autoPlay />
 
       {/* Media display with optional surrounding text */}
       <div className={`media-content ${getAnimClass()}`}>

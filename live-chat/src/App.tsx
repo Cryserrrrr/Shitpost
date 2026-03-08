@@ -796,8 +796,12 @@ function MainChat() {
   }, []);
 
   const trimAudio = useCallback(async (dataUrl: string, segs: { start: number; end: number }[]): Promise<string> => {
-    const response = await fetch(dataUrl);
-    const arrayBuffer = await response.arrayBuffer();
+    // Convert data URL to ArrayBuffer directly (fetch on data URLs can fail in WebView2)
+    const base64Part = dataUrl.split(",")[1];
+    const binary = atob(base64Part);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const arrayBuffer = bytes.buffer;
     const audioCtx = new AudioContext();
     const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
     const sampleRate = decoded.sampleRate;
@@ -908,14 +912,17 @@ function MainChat() {
 
     // Trim audio overlay if present (for images or videos)
     let trimmedAudioOverlay: string | undefined;
+    let trimmedAudioMimeType: string | undefined;
     if ((mediaData.type === "image" || mediaData.type === "video") && audioData) {
       try {
         const audioDataUrl = `data:${audioData.mimeType};base64,${audioData.data}`;
         const trimmed = await trimAudio(audioDataUrl, [{ start: audioTrimStart, end: audioTrimEnd }]);
         trimmedAudioOverlay = trimmed.split(",")[1];
+        trimmedAudioMimeType = "audio/wav";
       } catch (err) {
         console.error("Audio overlay trim failed:", err);
         trimmedAudioOverlay = audioData.data;
+        trimmedAudioMimeType = audioData.mimeType;
       }
     }
 
@@ -931,7 +938,7 @@ function MainChat() {
       duration: (mediaData.type === "video" || mediaData.type === "audio") ? Math.round(totalSegDuration(segments) * loopCount * 1000) : timeoutMs,
       textOverlay: hasText ? { ...textData, fontSize: textSize, position: textPosition } : undefined,
       audioBuffer: trimmedAudioOverlay,
-      audioMimeType: trimmedAudioOverlay ? "audio/wav" : undefined,
+      audioMimeType: trimmedAudioMimeType,
     });
 
     // Save to history

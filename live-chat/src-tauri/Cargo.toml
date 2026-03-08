@@ -1,6 +1,6 @@
 [package]
 name = "live-chat"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shitpost - Balance des merdes a tes potes"
 authors = ["you"]
 edition = "2021"
