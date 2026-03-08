@@ -20,7 +20,7 @@ export class GroupsService {
     });
   }
 
-  static async addMember(groupId: string, requesterId: string, username: string) {
+  static async inviteMember(groupId: string, requesterId: string, username: string) {
     const group = await prisma.group.findUnique({
       where: { id: groupId },
       include: { members: true },
@@ -30,7 +30,7 @@ export class GroupsService {
 
     const requester = group.members.find((m: any) => m.userId === requesterId);
     if (!requester || (requester.role !== "owner" && requester.role !== "admin")) {
-      throw new Error("Not authorized to add members");
+      throw new Error("Not authorized to invite members");
     }
 
     const userToAdd = await prisma.user.findUnique({
@@ -43,11 +43,73 @@ export class GroupsService {
       throw new Error("User is already a member");
     }
 
-    return prisma.groupMember.create({
-      data: {
+    // Check for existing pending invite
+    const existingInvite = await prisma.groupInvite.findUnique({
+      where: { groupId_inviteeId: { groupId, inviteeId: userToAdd.id } },
+    });
+    if (existingInvite && existingInvite.status === "pending") {
+      throw new Error("Invite already pending");
+    }
+
+    // Upsert invite (in case a declined one exists)
+    return prisma.groupInvite.upsert({
+      where: { groupId_inviteeId: { groupId, inviteeId: userToAdd.id } },
+      update: { status: "pending", inviterId: requesterId },
+      create: {
         groupId,
-        userId: userToAdd.id,
-        role: "member",
+        inviterId: requesterId,
+        inviteeId: userToAdd.id,
+        status: "pending",
+      },
+      include: {
+        group: { select: { id: true, name: true } },
+        inviter: { select: { id: true, username: true } },
+        invitee: { select: { id: true, username: true } },
+      },
+    });
+  }
+
+  static async acceptInvite(inviteId: string, userId: string) {
+    const invite = await prisma.groupInvite.findUnique({
+      where: { id: inviteId },
+      include: { group: true },
+    });
+
+    if (!invite || invite.inviteeId !== userId) throw new Error("Invite not found");
+    if (invite.status !== "pending") throw new Error("Invite is no longer pending");
+
+    // Add member and mark invite as accepted
+    await prisma.groupMember.create({
+      data: { groupId: invite.groupId, userId, role: "member" },
+    });
+
+    await prisma.groupInvite.update({
+      where: { id: inviteId },
+      data: { status: "accepted" },
+    });
+
+    return invite;
+  }
+
+  static async declineInvite(inviteId: string, userId: string) {
+    const invite = await prisma.groupInvite.findUnique({
+      where: { id: inviteId },
+    });
+
+    if (!invite || invite.inviteeId !== userId) throw new Error("Invite not found");
+
+    return prisma.groupInvite.update({
+      where: { id: inviteId },
+      data: { status: "declined" },
+    });
+  }
+
+  static async getPendingInvites(userId: string) {
+    return prisma.groupInvite.findMany({
+      where: { inviteeId: userId, status: "pending" },
+      include: {
+        group: { select: { id: true, name: true } },
+        inviter: { select: { id: true, username: true } },
       },
     });
   }

@@ -41,6 +41,12 @@ const translations = {
     "groups.demote_member": "Retrograder membre",
     "groups.kick": "Expulser",
     "groups.no_groups": "Aucun groupe",
+    "groups.invite_sent": "Invitation envoyee !",
+    "groups.invite_pending": "Invitation en attente",
+    "groups.invites": "Invitations de groupe",
+    "groups.invited_by": "Invite par",
+    "groups.copy_link": "Copier le lien d'invitation",
+    "groups.link_copied": "Lien copie !",
 
     // Friends
     "friends.add": "Ajouter un ami",
@@ -55,6 +61,10 @@ const translations = {
     "friends.online": "En ligne",
     "friends.offline": "Hors ligne",
     "friends.username_placeholder": "Pseudo de l'ami",
+    "friends.copy_link": "Copier mon lien d'ajout",
+    "friends.link_copied": "Lien copie !",
+    "friends.confirm_add": "Ajouter en ami ?",
+    "friends.paste_link": "Coller un lien d'invitation",
 
     // Media / Sending
     "media.your_shitpost": "Ton Shitpost",
@@ -96,6 +106,7 @@ const translations = {
     "settings.server_url": "URL DU SERVEUR",
     "settings.server_url_placeholder": "https://shitpost.example.com",
     "settings.server_connect": "Connecter",
+    "settings.overlay_screen": "Ecran de l'overlay",
 
     // Memes
     "memes.title": "Mes Shitposts",
@@ -189,6 +200,12 @@ const translations = {
     "groups.demote_member": "Demote to member",
     "groups.kick": "Kick",
     "groups.no_groups": "No groups",
+    "groups.invite_sent": "Invite sent!",
+    "groups.invite_pending": "Invite pending",
+    "groups.invites": "Group invites",
+    "groups.invited_by": "Invited by",
+    "groups.copy_link": "Copy invite link",
+    "groups.link_copied": "Link copied!",
 
     // Friends
     "friends.add": "Add friend",
@@ -203,6 +220,10 @@ const translations = {
     "friends.online": "Online",
     "friends.offline": "Offline",
     "friends.username_placeholder": "Friend's username",
+    "friends.copy_link": "Copy my invite link",
+    "friends.link_copied": "Link copied!",
+    "friends.confirm_add": "Add as friend?",
+    "friends.paste_link": "Paste an invite link",
 
     // Media / Sending
     "media.your_shitpost": "Your Shitpost",
@@ -244,6 +265,7 @@ const translations = {
     "settings.server_url": "SERVER URL",
     "settings.server_url_placeholder": "https://shitpost.example.com",
     "settings.server_connect": "Connect",
+    "settings.overlay_screen": "Overlay screen",
 
     // Memes
     "memes.title": "My Shitposts",

@@ -33,6 +33,53 @@ fn set_overlay_interactive(app: tauri::AppHandle, interactive: bool) -> Result<(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct MonitorInfo {
+    name: String,
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+}
+
+#[tauri::command]
+fn list_monitors(app: tauri::AppHandle) -> Vec<MonitorInfo> {
+    let overlay = match app.get_webview_window("overlay") {
+        Some(w) => w,
+        None => return vec![],
+    };
+    let monitors = match overlay.available_monitors() {
+        Ok(m) => m,
+        Err(_) => return vec![],
+    };
+    monitors
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let size = m.size();
+            let pos = m.position();
+            MonitorInfo {
+                name: m.name().cloned().unwrap_or_else(|| format!("Monitor {}", i + 1)),
+                width: size.width,
+                height: size.height,
+                x: pos.x,
+                y: pos.y,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn set_overlay_monitor(app: tauri::AppHandle, x: i32, y: i32, width: u32, height: u32) -> Result<(), String> {
+    let overlay = app.get_webview_window("overlay").ok_or("overlay not found")?;
+    overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
+        .map_err(|e| e.to_string())?;
+    overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(width, height)))
+        .map_err(|e| e.to_string())?;
+    force_overlay_on_top(&overlay);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_autostart(app: tauri::AppHandle) -> bool {
     app.autolaunch().is_enabled().unwrap_or(false)
@@ -56,11 +103,12 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
-        .invoke_handler(tauri::generate_handler![get_autostart, set_autostart, set_overlay_interactive])
+        .invoke_handler(tauri::generate_handler![get_autostart, set_autostart, set_overlay_interactive, list_monitors, set_overlay_monitor])
         .setup(|app| {
             // Setup overlay window
             let overlay_window = app.get_webview_window("overlay").unwrap();

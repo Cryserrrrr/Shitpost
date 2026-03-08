@@ -40,6 +40,48 @@ export class FriendsService {
     });
   }
 
+  static async addFriendDirect(userId: string, friendUsername: string) {
+    const friend = await prisma.user.findUnique({
+      where: { username: friendUsername },
+    });
+
+    if (!friend) {
+      throw new Error("User not found");
+    }
+
+    if (userId === friend.id) {
+      throw new Error("You cannot add yourself as a friend");
+    }
+
+    const existing = await prisma.friendship.findFirst({
+      where: {
+        OR: [
+          { requesterId: userId, addresseeId: friend.id },
+          { requesterId: friend.id, addresseeId: userId },
+        ],
+      },
+    });
+
+    if (existing) {
+      if (existing.status === "accepted") {
+        throw new Error("You are already friends");
+      }
+      // Upgrade pending request to accepted
+      return prisma.friendship.update({
+        where: { id: existing.id },
+        data: { status: "accepted" },
+      });
+    }
+
+    return prisma.friendship.create({
+      data: {
+        requesterId: userId,
+        addresseeId: friend.id,
+        status: "accepted",
+      },
+    });
+  }
+
   static async acceptFriendRequest(userId: string, requestId: string) {
     const request = await prisma.friendship.findUnique({
       where: { id: requestId },

@@ -55,6 +55,7 @@
     {
       "identifier": "fs:allow-remove",
       "allow": [{ "path": "**" }]
-    }
+    },
+    "deep-link:default"
   ]
 }

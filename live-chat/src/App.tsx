@@ -81,6 +81,8 @@ function MainChat() {
   const [modal, setModal] = useState<{ type: "createGroup" | "addMember" | "manageGroup"; groupId?: string } | null>(null);
   const [modalInput, setModalInput] = useState("");
   const [autostart, setAutostart] = useState(false);
+  const [monitors, setMonitors] = useState<{ name: string; width: number; height: number; x: number; y: number }[]>([]);
+  const [selectedMonitor, setSelectedMonitor] = useState(0);
   const [compressing, setCompressing] = useState(false);
   const [compressProgress, setCompressProgress] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -92,17 +94,26 @@ function MainChat() {
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const [globalDragging, setGlobalDragging] = useState(false);
   const [dropProgress, setDropProgress] = useState<{ current: number; total: number } | null>(null);
+  const [groupInvites, setGroupInvites] = useState<any[]>([]);
+  const [serverModal, setServerModal] = useState(false);
+  const [serverUrlInput, setServerUrlInput] = useState("");
+  const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  const [inviteLinkInput, setInviteLinkInput] = useState("");
+  const [inviteLinkModal, setInviteLinkModal] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; friendId: string; friendName: string } | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
-      const [friendsRes, groupsRes, pendingRes] = await Promise.all([
+      const [friendsRes, groupsRes, pendingRes, groupInvitesRes] = await Promise.all([
         api.get("/friends"),
         api.get("/groups"),
         api.get("/friends/pending"),
+        api.get("/groups/invites/pending"),
       ]);
       setFriends(friendsRes.data);
       setGroups(groupsRes.data);
       setPendingRequests(pendingRes.data);
+      setGroupInvites(groupInvitesRes.data);
     } catch (err) {
       console.error("Failed to fetch data", err);
     }
@@ -176,6 +187,34 @@ function MainChat() {
       });
     });
 
+    // Real-time friend request updates
+    newSocket.on("friends:request_received", (data: any) => {
+      setPendingRequests((prev) => {
+        if (prev.some((r: any) => r.id === data.id)) return prev;
+        return [...prev, data];
+      });
+    });
+
+    newSocket.on("friends:request_accepted", (data: { friend: any }) => {
+      setFriends((prev) => {
+        if (prev.some((f: any) => f.id === data.friend.id)) return prev;
+        return [...prev, data.friend];
+      });
+    });
+
+    // Real-time group invite updates
+    newSocket.on("groups:invite_received", (data: any) => {
+      setGroupInvites((prev) => {
+        if (prev.some((i: any) => i.id === data.id)) return prev;
+        return [...prev, data];
+      });
+    });
+
+    newSocket.on("groups:member_joined", () => {
+      // Refresh groups to get updated member list
+      api.get("/groups").then((res) => setGroups(res.data)).catch(() => {});
+    });
+
     newSocket.on("media:sent", (data: { results: Array<{ targetId: string; delivered: boolean }> }) => {
       const allDelivered = data.results?.every((r: { delivered: boolean }) => r.delivered) ?? true;
       const offlineCount = data.results?.filter((r: { delivered: boolean }) => !r.delivered).length ?? 0;
@@ -233,10 +272,29 @@ function MainChat() {
     }
   }, [token]);
 
-  // Load autostart status
+  // Load autostart status + monitors list
   useEffect(() => {
     const invoke = (window as any).__TAURI__?.core?.invoke;
-    if (invoke) invoke("get_autostart").then((v: boolean) => setAutostart(v)).catch(() => {});
+    if (invoke) {
+      invoke("get_autostart").then((v: boolean) => {
+        setAutostart(v);
+        if (!v && !localStorage.getItem("autostartInitialized")) {
+          invoke("set_autostart", { enabled: true }).then(() => setAutostart(true)).catch(() => {});
+        }
+        localStorage.setItem("autostartInitialized", "true");
+      }).catch(() => {});
+      invoke("list_monitors").then((m: any[]) => {
+        setMonitors(m);
+        const saved = localStorage.getItem("overlayMonitor");
+        if (saved !== null) {
+          const idx = Number(saved);
+          setSelectedMonitor(idx);
+          if (m[idx]) {
+            invoke("set_overlay_monitor", { x: m[idx].x, y: m[idx].y, width: m[idx].width, height: m[idx].height }).catch(() => {});
+          }
+        }
+      }).catch(() => {});
+    }
   }, []);
 
   // Preview with text overlay
@@ -399,7 +457,7 @@ function MainChat() {
                 if (!isDup) {
                   const bytes = await readFile(paths[i]);
                   const fileName = paths[i].split("\\").pop() || paths[i].split("/").pop() || `file_${i}`;
-                  await saveToMemesFolder(new Uint8Array(bytes), fileName);
+                  await saveToMemesFolder(new Uint8Array(bytes), fileName, true);
                 }
                 setDropProgress({ current: i + 1, total: paths.length });
               }
@@ -681,21 +739,114 @@ function MainChat() {
     setModal({ type: "manageGroup", groupId });
   };
 
+  const handleAcceptGroupInvite = async (inviteId: string) => {
+    try {
+      await api.post(`/groups/invites/${inviteId}/accept`);
+      setGroupInvites((prev) => prev.filter((i: any) => i.id !== inviteId));
+      fetchData();
+    } catch {}
+  };
+
+  const handleDeclineGroupInvite = async (inviteId: string) => {
+    try {
+      await api.post(`/groups/invites/${inviteId}/decline`);
+      setGroupInvites((prev) => prev.filter((i: any) => i.id !== inviteId));
+    } catch {}
+  };
+
   const handleModalSubmit = async () => {
     if (!modalInput.trim()) return;
     try {
       if (modal?.type === "createGroup") {
         await api.post("/groups", { name: modalInput });
+        fetchData();
       } else if (modal?.type === "addMember" && modal.groupId) {
         await api.post(`/groups/${modal.groupId}/members`, { username: modalInput });
+        setSendStatus(t("groups.invite_sent"));
+        setTimeout(() => setSendStatus(null), 2000);
       }
-      fetchData();
       setModal(null);
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
       setTimeout(() => setSendStatus(null), 3000);
     }
   };
+
+  const handleInviteLink = useCallback((link: string) => {
+    const trimmed = link.trim();
+
+    // Friend link: shitpost://friend/USERNAME
+    const friendMatch = trimmed.match(/^shitpost:\/\/friend\/(.+)$/);
+    if (friendMatch) {
+      const username = decodeURIComponent(friendMatch[1]);
+      if (username === user?.username) return;
+      setConfirmAction({
+        message: `${t("friends.confirm_add")}\n${username}`,
+        onConfirm: async () => {
+          try {
+            await api.post("/friends/add-direct", { username });
+            fetchData();
+            setSendStatus(t("friends.accept"));
+            setTimeout(() => setSendStatus(null), 2000);
+          } catch (err: any) {
+            setSendStatus(err.response?.data?.message || t("general.error"));
+            setTimeout(() => setSendStatus(null), 3000);
+          }
+          setConfirmAction(null);
+        },
+      });
+      return;
+    }
+
+    // Group link: shitpost://group/INVITE_CODE
+    const groupMatch = trimmed.match(/^shitpost:\/\/group\/(.+)$/);
+    if (groupMatch) {
+      const code = groupMatch[1];
+      // Resolve group info first
+      api.get(`/groups/resolve/${code}`).then((res) => {
+        const { groupName, memberCount } = res.data;
+        setConfirmAction({
+          message: `${t("groups.invites")}\n${groupName} (${memberCount} ${t("groups.members").toLowerCase()})`,
+          onConfirm: async () => {
+            try {
+              await api.post(`/groups/join/${code}`);
+              fetchData();
+              setSendStatus(t("friends.accept"));
+              setTimeout(() => setSendStatus(null), 2000);
+            } catch (err: any) {
+              setSendStatus(err.response?.data?.message || t("general.error"));
+              setTimeout(() => setSendStatus(null), 3000);
+            }
+            setConfirmAction(null);
+          },
+        });
+      }).catch(() => {
+        setSendStatus(t("general.error"));
+        setTimeout(() => setSendStatus(null), 2000);
+      });
+      return;
+    }
+  }, [user, fetchData, t]);
+
+  // Deep link handler
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/plugin-deep-link").then(({ onOpenUrl }) => {
+      onOpenUrl((urls) => {
+        for (const url of urls) {
+          handleInviteLink(url);
+        }
+        // Bring main window to front
+        const win = (window as any).__TAURI__?.window;
+        if (win) {
+          const main = win.getCurrentWindow?.() || win.getCurrent?.();
+          main?.show?.();
+          main?.setFocus?.();
+        }
+      }).then((fn) => { unlisten = fn; });
+    }).catch(() => {});
+    return () => { unlisten?.(); };
+  }, [handleInviteLink]);
 
   const handleKickMember = async (groupId: string, userId: string) => {
     try {
@@ -720,6 +871,17 @@ function MainChat() {
   const handleRenameGroup = async (groupId: string, newName: string) => {
     try {
       await api.patch(`/groups/${groupId}`, { name: newName });
+      fetchData();
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const handleRemoveFriend = async (friendId: string) => {
+    try {
+      await api.delete(`/friends/${friendId}`);
+      setSelectedTargets((prev) => prev.filter((id) => id !== friendId));
       fetchData();
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
@@ -824,7 +986,7 @@ function MainChat() {
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id as any)}
-            className="cartoon-tab flex items-center gap-2"
+            className="cartoon-tab flex items-center gap-2 relative"
             style={
               activeTab === tab.id
                 ? { background: tab.color, color: "#000", borderColor: "#000", boxShadow: "var(--shadow-cartoon-sm)" }
@@ -833,6 +995,14 @@ function MainChat() {
           >
             <tab.icon size={18} />
             {tab.label}
+            {tab.id === "social" && (pendingRequests.length + groupInvites.length) > 0 && (
+              <span
+                className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] flex items-center justify-center rounded-full text-white font-bold"
+                style={{ background: "var(--accent-red)", fontSize: 10, padding: "0 4px", border: "2px solid #000" }}
+              >
+                {pendingRequests.length + groupInvites.length}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -905,7 +1075,8 @@ function MainChat() {
                           onClick={async () => {
                             try {
                               await api.post(`/groups/${modal.groupId}/members`, { username: friend.username });
-                              fetchData();
+                              setSendStatus(t("groups.invite_sent"));
+                              setTimeout(() => setSendStatus(null), 2000);
                               setModal(null);
                             } catch (err: any) {
                               setSendStatus(err.response?.data?.message || t("general.error"));
@@ -982,6 +1153,19 @@ function MainChat() {
                       </div>
                     </div>
                   )}
+
+                  {/* Copy group invite link */}
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(`shitpost://group/${group.inviteCode}`);
+                      setSendStatus(t("groups.link_copied"));
+                      setTimeout(() => setSendStatus(null), 2000);
+                    }}
+                    className="cartoon-btn w-full py-1.5 text-xs mb-3"
+                    style={{ background: "var(--bg-input)", fontSize: 11 }}
+                  >
+                    <Icons.Link size={12} className="inline mr-1" /> {t("groups.copy_link")}
+                  </button>
 
                   {/* Members list */}
                   <label className="text-xs font-bold mb-2 block" style={{ color: "var(--text-muted)" }}>
@@ -1061,11 +1245,10 @@ function MainChat() {
                     )}
                     {isOwner && (
                       <button
-                        onClick={() => {
-                          if (confirm(t("groups.delete") + "?")) {
-                            handleDeleteGroup(group.id);
-                          }
-                        }}
+                        onClick={() => setConfirmAction({
+                          message: t("groups.delete") + " ?",
+                          onConfirm: () => { handleDeleteGroup(group.id); setConfirmAction(null); setModal(null); },
+                        })}
                         className="cartoon-btn flex-1 py-2 text-xs"
                         style={{ background: "var(--accent-red)", color: "#fff" }}
                       >
@@ -1079,6 +1262,112 @@ function MainChat() {
                 </>
               );
             })()}
+          </div>
+        </div>
+      )}
+
+      {/* Friend context menu */}
+      {contextMenu && (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
+        >
+          <div
+            className="absolute cartoon-card py-1"
+            style={{
+              left: contextMenu.x,
+              top: contextMenu.y,
+              minWidth: 160,
+              boxShadow: "var(--shadow-cartoon)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => {
+                setConfirmAction({
+                  message: `${t("friends.remove")} ${contextMenu.friendName} ?`,
+                  onConfirm: () => { handleRemoveFriend(contextMenu.friendId); setConfirmAction(null); },
+                });
+                setContextMenu(null);
+              }}
+              className="w-full text-left px-4 py-2 text-xs hover:opacity-80 flex items-center gap-2"
+              style={{ color: "var(--accent-red)" }}
+            >
+              <Icons.Trash size={12} /> {t("friends.remove")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Invite link modal */}
+      {inviteLinkModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }} onClick={() => setInviteLinkModal(false)}>
+          <div className="cartoon-card p-6 w-full" style={{ maxWidth: 400 }} onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-cartoon text-base mb-4 text-center" style={{ color: "var(--accent-cyan)" }}>
+              {t("friends.paste_link")}
+            </h3>
+            <input
+              value={inviteLinkInput}
+              onChange={(e) => setInviteLinkInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && inviteLinkInput.trim()) {
+                  handleInviteLink(inviteLinkInput.trim());
+                  setInviteLinkInput("");
+                  setInviteLinkModal(false);
+                }
+              }}
+              placeholder="shitpost://friend/... or shitpost://group/..."
+              className="cartoon-input w-full mb-4 text-sm"
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  if (inviteLinkInput.trim()) {
+                    handleInviteLink(inviteLinkInput.trim());
+                    setInviteLinkInput("");
+                    setInviteLinkModal(false);
+                  }
+                }}
+                className="cartoon-btn flex-1 py-2.5 text-sm"
+                style={{ background: "var(--accent-cyan)", color: "#000" }}
+              >
+                {t("general.confirm")}
+              </button>
+              <button
+                onClick={() => setInviteLinkModal(false)}
+                className="cartoon-btn flex-1 py-2.5 text-sm"
+                style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}
+              >
+                {t("general.cancel")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm modal */}
+      {confirmAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+          <div className="cartoon-card p-6 w-full" style={{ maxWidth: 360 }}>
+            <p className="font-bold text-center mb-4">{confirmAction.message}</p>
+            <div className="flex gap-2">
+              <button
+                onClick={confirmAction.onConfirm}
+                className="cartoon-btn flex-1 py-2.5 text-sm"
+                style={{ background: "var(--accent-red)", color: "#fff" }}
+              >
+                {t("general.confirm")}
+              </button>
+              <button
+                onClick={() => setConfirmAction(null)}
+                className="cartoon-btn flex-1 py-2.5 text-sm"
+                style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}
+              >
+                {t("general.cancel")}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1567,6 +1856,27 @@ function MainChat() {
                     {t("friends.send")}
                   </button>
                 </div>
+                {/* Copy & paste invite links */}
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(`shitpost://friend/${user?.username}`);
+                      setSendStatus(t("friends.link_copied"));
+                      setTimeout(() => setSendStatus(null), 2000);
+                    }}
+                    className="cartoon-btn flex-1 py-1.5 text-xs"
+                    style={{ background: "var(--bg-input)", fontSize: 11 }}
+                  >
+                    <Icons.Link size={12} className="inline mr-1" /> {t("friends.copy_link")}
+                  </button>
+                  <button
+                    onClick={() => { setInviteLinkInput(""); setInviteLinkModal(true); }}
+                    className="cartoon-btn flex-1 py-1.5 text-xs"
+                    style={{ background: "var(--bg-input)", fontSize: 11 }}
+                  >
+                    <Icons.Download size={12} className="inline mr-1" /> {t("friends.paste_link")}
+                  </button>
+                </div>
               </div>
 
               {/* Scrollable content for pending + groups */}
@@ -1596,6 +1906,43 @@ function MainChat() {
                             </button>
                             <button
                               onClick={() => handleDeclineFriend(req.id)}
+                              className="cartoon-btn px-3 py-1 text-xs"
+                              style={{ background: "var(--accent-red)", color: "#fff" }}
+                            >
+                              {t("friends.decline")}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Group invites */}
+                {groupInvites.length > 0 && (
+                  <div className="cartoon-card p-4" style={{ borderColor: "var(--accent-purple)" }}>
+                    <h3 className="font-cartoon text-sm mb-3" style={{ color: "var(--accent-purple)" }}>
+                      {t("groups.invites").toUpperCase()} ({groupInvites.length})
+                    </h3>
+                    <div className="space-y-2">
+                      {groupInvites.map((inv: any) => (
+                        <div key={inv.id} className="flex items-center justify-between p-3 rounded-xl" style={{ background: "var(--bg-input)" }}>
+                          <div className="min-w-0">
+                            <span className="font-bold text-sm">{inv.group?.name}</span>
+                            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                              {t("groups.invited_by")} {inv.inviter?.username}
+                            </p>
+                          </div>
+                          <div className="flex gap-2 flex-shrink-0">
+                            <button
+                              onClick={() => handleAcceptGroupInvite(inv.id)}
+                              className="cartoon-btn px-3 py-1 text-xs"
+                              style={{ background: "var(--accent-green)", color: "#000" }}
+                            >
+                              {t("friends.accept")}
+                            </button>
+                            <button
+                              onClick={() => handleDeclineGroupInvite(inv.id)}
                               className="cartoon-btn px-3 py-1 text-xs"
                               style={{ background: "var(--accent-red)", color: "#fff" }}
                             >
@@ -1693,22 +2040,57 @@ function MainChat() {
               </div>
               <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
                 <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.server").toUpperCase()}</p>
-                <div className="flex items-center gap-2">
-                  <code className="text-xs flex-1" style={{ color: "var(--accent-cyan)" }}>{getServerUrl()}</code>
-                  <button
-                    className="cartoon-btn text-xs px-3 py-1"
-                    style={{ background: "var(--accent-purple)", color: "#fff", fontSize: 11 }}
-                    onClick={() => {
-                      const url = prompt(t("settings.server_url_prompt"), getServerUrl());
-                      if (url && url.trim()) {
-                        setServerUrl(url.trim());
-                        window.location.reload();
-                      }
-                    }}
-                  >
-                    {t("settings.server_edit")}
-                  </button>
-                </div>
+                {serverModal ? (
+                  <div className="space-y-2">
+                    <p className="text-xs" style={{ color: "var(--text-muted)" }}>{t("settings.server_url").toUpperCase()}</p>
+                    <input
+                      type="text"
+                      value={serverUrlInput}
+                      onChange={(e) => setServerUrlInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && serverUrlInput.trim()) {
+                          setServerUrl(serverUrlInput.trim());
+                          window.location.reload();
+                        }
+                      }}
+                      placeholder={t("settings.server_url_placeholder")}
+                      className="cartoon-input w-full text-xs"
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          if (serverUrlInput.trim()) {
+                            setServerUrl(serverUrlInput.trim());
+                            window.location.reload();
+                          }
+                        }}
+                        className="cartoon-btn flex-1 py-1.5 text-xs"
+                        style={{ background: "var(--accent-green)", color: "#000" }}
+                      >
+                        {t("settings.server_connect")}
+                      </button>
+                      <button
+                        onClick={() => setServerModal(false)}
+                        className="cartoon-btn flex-1 py-1.5 text-xs"
+                        style={{ background: "var(--bg-card)" }}
+                      >
+                        {t("general.cancel")}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <code className="text-xs flex-1" style={{ color: "var(--accent-cyan)" }}>{getServerUrl()}</code>
+                    <button
+                      className="cartoon-btn text-xs px-3 py-1"
+                      style={{ background: "var(--accent-purple)", color: "#fff", fontSize: 11 }}
+                      onClick={() => { setServerUrlInput(getServerUrl()); setServerModal(true); }}
+                    >
+                      {t("settings.server_edit")}
+                    </button>
+                  </div>
+                )}
               </div>
               <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
                 <div className="flex items-center justify-between mb-2">
@@ -1740,6 +2122,36 @@ function MainChat() {
                   <span>{t("settings.max")}</span>
                 </div>
               </div>
+              {monitors.length > 1 && (
+                <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+                  <p className="text-xs font-bold mb-2" style={{ color: "var(--text-muted)" }}>
+                    {t("settings.overlay_screen").toUpperCase()}
+                  </p>
+                  <div className="flex gap-2">
+                    {monitors.map((m, i) => (
+                      <button
+                        key={i}
+                        onClick={() => {
+                          setSelectedMonitor(i);
+                          localStorage.setItem("overlayMonitor", String(i));
+                          const invoke = (window as any).__TAURI__?.core?.invoke;
+                          if (invoke) {
+                            invoke("set_overlay_monitor", { x: m.x, y: m.y, width: m.width, height: m.height }).catch(() => {});
+                          }
+                        }}
+                        className="cartoon-btn px-3 py-2 text-xs font-bold flex-1"
+                        style={{
+                          background: selectedMonitor === i ? "var(--accent-cyan)" : "var(--bg-card)",
+                          color: selectedMonitor === i ? "#000" : "var(--text-muted)",
+                        }}
+                      >
+                        <div>{m.name}</div>
+                        <div style={{ fontSize: 10 }}>{m.width}x{m.height}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div
                 className="p-4 rounded-xl flex items-center justify-between"
                 style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}
@@ -1883,6 +2295,10 @@ function MainChat() {
                       <div
                         key={friend.id}
                         onClick={() => handleTargetToggle(friend.id)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setContextMenu({ x: e.clientX, y: e.clientY, friendId: friend.id, friendName: friend.username });
+                        }}
                         className={`friend-item ${isSelected ? "selected" : ""}`}
                       >
                         <div className="relative">

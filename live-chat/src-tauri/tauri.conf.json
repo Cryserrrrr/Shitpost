@@ -54,6 +54,13 @@
     },
     "withGlobalTauri": true
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["shitpost"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

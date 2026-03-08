@@ -26,6 +26,8 @@ model User {
   // Group relationships
   ownedGroups      Group[]       @relation("GroupOwner")
   groupMemberships GroupMember[]
+  sentGroupInvites     GroupInvite[] @relation("GroupInviteSender")
+  receivedGroupInvites GroupInvite[] @relation("GroupInviteReceiver")
 
   // Refresh tokens
   refreshTokens RefreshToken[]
@@ -52,11 +54,13 @@ model Group {
   description String?
   avatarUrl   String?
   ownerId     String
+  inviteCode  String   @unique @default(uuid())
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   owner   User          @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   members GroupMember[]
+  invites GroupInvite[]
 }
 
 model RefreshToken {
@@ -85,4 +89,20 @@ model GroupMember {
   @@unique([userId, groupId])
   @@index([userId])
   @@index([groupId])
+}
+
+model GroupInvite {
+  id        String   @id @default(uuid())
+  groupId   String
+  inviterId String
+  inviteeId String
+  status    String   @default("pending") // pending, accepted, declined
+  createdAt DateTime @default(now())
+
+  group   Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  inviter User  @relation("GroupInviteSender", fields: [inviterId], references: [id], onDelete: Cascade)
+  invitee User  @relation("GroupInviteReceiver", fields: [inviteeId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, inviteeId])
+  @@index([inviteeId])
 }
