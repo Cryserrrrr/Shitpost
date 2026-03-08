@@ -154,12 +154,18 @@ io.on("connection", async (socket) => {
   addUserSocket(userId, socket.id);
   socket.join(`user:${userId}`);
 
-  // Mark user online
+  // Mark user online (preserve DND if set)
+  let currentStatus = "online";
   try {
-    await prisma.user.update({
-      where: { id: userId },
-      data: { status: "online" },
-    });
+    const dbUser = await prisma.user.findUnique({ where: { id: userId }, select: { status: true } });
+    if (dbUser?.status === "dnd") {
+      currentStatus = "dnd";
+    } else {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { status: "online" },
+      });
+    }
   } catch {}
 
   // Notify friends that this user is online
@@ -169,7 +175,7 @@ io.on("connection", async (socket) => {
       io.to(`user:${friend.id}`).emit("presence:update", {
         userId,
         username,
-        status: "online",
+        status: currentStatus,
       });
     }
 
@@ -180,8 +186,21 @@ io.on("connection", async (socket) => {
     socket.emit("presence:online_friends", onlineFriendIds);
   } catch {}
 
+  // Handle DND toggle
+  socket.on("status:set_dnd", async (enabled: boolean) => {
+    const newStatus = enabled ? "dnd" : "online";
+    try {
+      await prisma.user.update({ where: { id: userId }, data: { status: newStatus } });
+      const friends = await FriendsService.getFriends(userId);
+      for (const friend of friends) {
+        io.to(`user:${friend.id}`).emit("presence:update", { userId, username, status: newStatus });
+      }
+      socket.emit("status:dnd_updated", enabled);
+    } catch {}
+  });
+
   // Handle media broadcast (memes!)
-  socket.on("broadcast_media", (message: BroadcastMediaMessage) => {
+  socket.on("broadcast_media", async (message: BroadcastMediaMessage) => {
     const { targetIds, mediaType, mediaBuffer, mimeType, duration, textOverlay, audioBuffer, audioMimeType } = message;
 
     if (!targetIds || !Array.isArray(targetIds) || targetIds.length === 0) return;
@@ -200,14 +219,27 @@ io.on("connection", async (socket) => {
 
     console.log(`[>] ${username} sends ${mediaType} to ${targetIds.length} target(s)`);
 
+    // Check DND status for all targets
+    const dndUsers = new Set<string>();
+    try {
+      const users = await prisma.user.findMany({
+        where: { id: { in: targetIds }, status: "dnd" },
+        select: { id: true },
+      });
+      for (const u of users) dndUsers.add(u.id);
+    } catch {}
+
     for (const targetId of targetIds) {
-      io.to(`user:${targetId}`).emit("media:show", payload);
+      if (!dndUsers.has(targetId)) {
+        io.to(`user:${targetId}`).emit("media:show", payload);
+      }
     }
 
     // Report delivery status per target
     const results = targetIds.map((id) => ({
       targetId: id,
-      delivered: userSockets.has(id),
+      delivered: userSockets.has(id) && !dndUsers.has(id),
+      dnd: dndUsers.has(id),
     }));
     socket.emit("media:sent", { results });
   });

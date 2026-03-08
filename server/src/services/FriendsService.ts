@@ -40,13 +40,13 @@ export class FriendsService {
     });
   }
 
-  static async addFriendDirect(userId: string, friendUsername: string) {
+  static async addFriendByCode(userId: string, inviteCode: string) {
     const friend = await prisma.user.findUnique({
-      where: { username: friendUsername },
+      where: { inviteCode },
     });
 
     if (!friend) {
-      throw new Error("User not found");
+      throw new Error("Invalid invite code");
     }
 
     if (userId === friend.id) {
@@ -64,20 +64,18 @@ export class FriendsService {
 
     if (existing) {
       if (existing.status === "accepted") {
-        throw new Error("You are already friends");
+        throw new Error("Already friends");
       }
-      // Upgrade pending request to accepted
-      return prisma.friendship.update({
-        where: { id: existing.id },
-        data: { status: "accepted" },
-      });
+      if (existing.status === "pending") {
+        throw new Error("Request already pending");
+      }
     }
 
     return prisma.friendship.create({
       data: {
         requesterId: userId,
         addresseeId: friend.id,
-        status: "accepted",
+        status: "pending",
       },
     });
   }

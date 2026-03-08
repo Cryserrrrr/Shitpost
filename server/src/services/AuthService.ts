@@ -85,11 +85,14 @@ export class AuthService {
 
     const hashedPassword = await this.hashPassword(password);
 
+    const inviteCode = crypto.randomBytes(4).toString("hex").toUpperCase();
+
     const user = await prisma.user.create({
       data: {
         username,
         password: hashedPassword,
         status: "online",
+        inviteCode,
       },
       select: {
         id: true,

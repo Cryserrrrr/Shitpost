@@ -11,13 +11,14 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  username  String   @unique
-  password  String   // hashed with bcrypt
-  avatarUrl String?
-  status    String   @default("offline") // online, offline, busy
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(uuid())
+  username   String   @unique
+  password   String   // hashed with bcrypt
+  avatarUrl  String?
+  status     String   @default("offline") // online, offline, busy
+  inviteCode String   @unique @default(uuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   // Friend relationships
   sentFriendRequests     Friendship[] @relation("FriendshipRequester")

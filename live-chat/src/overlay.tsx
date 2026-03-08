@@ -5,7 +5,7 @@ import { getServerUrl } from "./services/api";
 import "./overlay.css";
 
 interface MediaData {
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "audio";
   mediaBuffer: string;
   mimeType: string;
   duration: number;
@@ -92,7 +92,7 @@ function Overlay() {
           console.error("Failed to save to history:", err);
         }
 
-        if (data.mediaType !== "video") {
+        if (data.mediaType === "image") {
           try {
             const { saveToMemesFolder } = await import("./services/memesUtils");
             const ext = data.mimeType.split("/")[1]?.replace("jpeg", "jpg") || "png";
@@ -119,6 +119,36 @@ function Overlay() {
       // Play audio
       const volume = Math.min(Math.max(Number(localStorage.getItem("memeVolume") ?? 100), 0), 100) / 100;
       console.log("[MEDIA] Type:", data.mediaType, "| MIME:", data.mimeType, "| Volume:", volume, "| Buffer size:", data.mediaBuffer?.length);
+
+      // For standalone audio: play the media itself
+      if (data.mediaType === "audio" && data.mediaBuffer) {
+        try {
+          const audioBlob = base64ToBlob(data.mediaBuffer, data.mimeType);
+          const audioUrl = URL.createObjectURL(audioBlob);
+          audioBlobUrlRef.current = audioUrl;
+
+          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const response = await fetch(audioUrl);
+          const arrayBuffer = await response.arrayBuffer();
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          const source = audioCtx.createBufferSource();
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = volume;
+          source.buffer = audioBuffer;
+          source.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+          source.start(0);
+
+          source.onended = () => { source.stop(); audioCtx.close(); };
+        } catch (err) {
+          console.error("[AUDIO] Standalone audio playback failed:", err);
+          if (audioRef.current && audioBlobUrlRef.current) {
+            audioRef.current.src = audioBlobUrlRef.current;
+            audioRef.current.volume = volume;
+            audioRef.current.play().catch(() => {});
+          }
+        }
+      }
 
       // For images with attached audio
       if (data.audioBuffer && data.audioMimeType) {
@@ -321,6 +351,15 @@ function Overlay() {
         <div className="media-wrapper" style={{ position: "relative" }}>
           {media.mediaType === "image" && (
             <img src={mediaUrl} alt="" className="overlay-image" />
+          )}
+          {media.mediaType === "audio" && (
+            <div className="overlay-audio">
+              <div className="audio-bars">
+                {Array.from({ length: 12 }).map((_, i) => (
+                  <div key={i} className="audio-bar" style={{ animationDelay: `${i * 0.08}s` }} />
+                ))}
+              </div>
+            </div>
           )}
           {media.mediaType === "video" && (
             <video

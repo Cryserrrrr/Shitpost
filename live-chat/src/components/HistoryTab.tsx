@@ -11,7 +11,7 @@ import { saveToMemesFolder } from "../services/memesUtils";
 interface HistoryTabProps {
   t: (key: any) => string;
   onStatus: (msg: string) => void;
-  onSelectMeme: (dataUrl: string, mimeType: string, isVideo: boolean) => void;
+  onSelectMeme: (dataUrl: string, mimeType: string, mediaType: "image" | "video" | "audio") => void;
 }
 
 function timeAgo(ts: number, t: (k: any) => string): string {
@@ -255,7 +255,7 @@ export default function HistoryTab({ t, onStatus, onSelectMeme }: HistoryTabProp
                   <div
                     className="relative cursor-pointer"
                     style={{ aspectRatio: "16/10" }}
-                    onClick={() => onSelectMeme(dataUrl, entry.mimeType, entry.mediaType === "video")}
+                    onClick={() => onSelectMeme(dataUrl, entry.mimeType, entry.mediaType)}
                     onMouseEnter={() => handleMouseEnter(entry)}
                     onMouseLeave={() => handleMouseLeave(entry)}
                   >

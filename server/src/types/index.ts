@@ -1,7 +1,7 @@
 import { Socket } from "socket.io";
 
 export interface MediaShowPayload {
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "audio";
   mediaBuffer: string;
   mimeType: string;
   duration: number;
@@ -16,7 +16,7 @@ export interface MediaShowPayload {
 
 export interface BroadcastMediaMessage {
   targetIds: string[];
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "audio";
   mediaBuffer: string;
   mimeType: string;
   duration: number;

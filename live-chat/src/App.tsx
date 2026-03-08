@@ -13,6 +13,11 @@ import HistoryTab from "./components/HistoryTab";
 
 
 const TIMEOUT_LIMITS = { min: 1000, maxImage: 10000, maxVideo: 30000, step: 500 } as const;
+const SEGMENT_COLORS = ["var(--accent-cyan)", "var(--accent-pink)", "var(--accent-green)", "var(--accent-yellow)", "var(--accent-purple)", "var(--accent-orange)"];
+const segColor = (i: number) => SEGMENT_COLORS[i % SEGMENT_COLORS.length];
+const totalSegDuration = (segs: { start: number; end: number }[]) => segs.reduce((s, g) => s + (g.end - g.start), 0);
+const MAX_FILE_SIZE = { image: 100 * 1024 * 1024, video: 500 * 1024 * 1024, audio: 50 * 1024 * 1024 } as const;
+const MAX_DROP_FILES = 50;
 
 const AVATAR_COLORS = [
   "#ff6b9d", "#2de2e6", "#ffd700", "#ff8c42",
@@ -26,7 +31,7 @@ function getAvatarColor(str: string): string {
 }
 
 interface MediaData {
-  type: "image" | "video";
+  type: "image" | "video" | "audio";
   data: string;
   mimeType: string;
 }
@@ -59,6 +64,7 @@ function MainChat() {
   const socketRef = useRef<Socket | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [friends, setFriends] = useState<any[]>([]);
+  const [myInviteCode, setMyInviteCode] = useState<string>("");
   const [groups, setGroups] = useState<any[]>([]);
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
   const [onlineFriendIds, setOnlineFriendIds] = useState<string[]>([]);
@@ -86,34 +92,52 @@ function MainChat() {
   const [compressing, setCompressing] = useState(false);
   const [compressProgress, setCompressProgress] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
-  const [trimStart, setTrimStart] = useState(0);
-  const [trimEnd, setTrimEnd] = useState(0);
+  const [segments, setSegments] = useState<{ start: number; end: number }[]>([]);
+  const [activeSegment, setActiveSegment] = useState(0);
+  const segmentPlayRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const [previewMuted, setPreviewMuted] = useState(true);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const [playheadTime, setPlayheadTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [audioTrimStart, setAudioTrimStart] = useState(0);
+  const [audioTrimEnd, setAudioTrimEnd] = useState(0);
+  const [audioOverlayMuted, setAudioOverlayMuted] = useState(false);
+  const audioOverlayRef = useRef<HTMLAudioElement>(null);
   const [globalDragging, setGlobalDragging] = useState(false);
   const [dropProgress, setDropProgress] = useState<{ current: number; total: number } | null>(null);
   const [groupInvites, setGroupInvites] = useState<any[]>([]);
   const [serverModal, setServerModal] = useState(false);
   const [serverUrlInput, setServerUrlInput] = useState("");
   const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  const [dndEnabled, setDndEnabled] = useState(false);
+  const [selfDefault, setSelfDefault] = useState(() => localStorage.getItem("selfDefault") === "true");
+  const [dndFriendIds, setDndFriendIds] = useState<string[]>([]);
+  const [userContextMenu, setUserContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [inviteLinkInput, setInviteLinkInput] = useState("");
   const [inviteLinkModal, setInviteLinkModal] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; friendId: string; friendName: string } | null>(null);
 
+  // Initialize DND from user status
+  useEffect(() => {
+    if (user?.status === "dnd") setDndEnabled(true);
+  }, [user?.status]);
+
   const fetchData = useCallback(async () => {
     try {
-      const [friendsRes, groupsRes, pendingRes, groupInvitesRes] = await Promise.all([
+      const [friendsRes, groupsRes, pendingRes, groupInvitesRes, inviteCodeRes] = await Promise.all([
         api.get("/friends"),
         api.get("/groups"),
         api.get("/friends/pending"),
         api.get("/groups/invites/pending"),
+        api.get("/friends/invite-code"),
       ]);
       setFriends(friendsRes.data);
       setGroups(groupsRes.data);
       setPendingRequests(pendingRes.data);
       setGroupInvites(groupInvitesRes.data);
+      setMyInviteCode(inviteCodeRes.data.inviteCode);
     } catch (err) {
       console.error("Failed to fetch data", err);
     }
@@ -180,7 +204,13 @@ function MainChat() {
 
     newSocket.on("presence:update", (data: { userId: string; status: string }) => {
       setOnlineFriendIds((prev) => {
-        if (data.status === "online") {
+        if (data.status === "online" || data.status === "dnd") {
+          return prev.includes(data.userId) ? prev : [...prev, data.userId];
+        }
+        return prev.filter((id) => id !== data.userId);
+      });
+      setDndFriendIds((prev) => {
+        if (data.status === "dnd") {
           return prev.includes(data.userId) ? prev : [...prev, data.userId];
         }
         return prev.filter((id) => id !== data.userId);
@@ -215,13 +245,21 @@ function MainChat() {
       api.get("/groups").then((res) => setGroups(res.data)).catch(() => {});
     });
 
-    newSocket.on("media:sent", (data: { results: Array<{ targetId: string; delivered: boolean }> }) => {
-      const allDelivered = data.results?.every((r: { delivered: boolean }) => r.delivered) ?? true;
-      const offlineCount = data.results?.filter((r: { delivered: boolean }) => !r.delivered).length ?? 0;
+    newSocket.on("status:dnd_updated", (enabled: boolean) => {
+      setDndEnabled(enabled);
+    });
+
+    newSocket.on("media:sent", (data: { results: Array<{ targetId: string; delivered: boolean; dnd?: boolean }> }) => {
+      const dndCount = data.results?.filter((r) => r.dnd).length ?? 0;
+      const offlineCount = data.results?.filter((r) => !r.delivered && !r.dnd).length ?? 0;
+      const allDelivered = dndCount === 0 && offlineCount === 0;
       if (allDelivered) {
         setSendStatus(t("media.sent"));
       } else {
-        setSendStatus(`${t("media.sent")} (${offlineCount} offline)`);
+        const parts: string[] = [];
+        if (offlineCount > 0) parts.push(`${offlineCount} offline`);
+        if (dndCount > 0) parts.push(`${dndCount} ${t("settings.dnd").toLowerCase()}`);
+        setSendStatus(`${t("media.sent")} (${parts.join(", ")})`);
       }
       setTimeout(() => setSendStatus(null), 2000);
     });
@@ -322,15 +360,22 @@ function MainChat() {
           ctx.lineWidth = fontSize / 10;
           ctx.fillStyle = "#ffffff";
 
+          const lineHeight = fontSize * 1.15;
           if (text.topText) {
-            const t = text.topText.toUpperCase();
-            ctx.strokeText(t, canvas.width / 2, fontSize + 10);
-            ctx.fillText(t, canvas.width / 2, fontSize + 10);
+            const lines = text.topText.toUpperCase().split("\n");
+            lines.forEach((line, i) => {
+              const y = fontSize + 10 + i * lineHeight;
+              ctx.strokeText(line, canvas.width / 2, y);
+              ctx.fillText(line, canvas.width / 2, y);
+            });
           }
           if (text.bottomText) {
-            const t = text.bottomText.toUpperCase();
-            ctx.strokeText(t, canvas.width / 2, canvas.height - 20);
-            ctx.fillText(t, canvas.width / 2, canvas.height - 20);
+            const lines = text.bottomText.toUpperCase().split("\n");
+            lines.forEach((line, i) => {
+              const y = canvas.height - 20 - (lines.length - 1 - i) * lineHeight;
+              ctx.strokeText(line, canvas.width / 2, y);
+              ctx.fillText(line, canvas.width / 2, y);
+            });
           }
 
           resolve(canvas.toDataURL("image/png", 1.0));
@@ -362,50 +407,85 @@ function MainChat() {
   }, [mediaData?.type]);
 
   const loadMediaFile = useCallback((file: File, dataUrl: string) => {
-    const isVideo = file.type.startsWith("video/");
-    setMediaData({ type: isVideo ? "video" : "image", data: dataUrl, mimeType: file.type });
-    if (isVideo) {
-      const v = document.createElement("video");
-      v.src = dataUrl;
-      v.onloadedmetadata = () => {
-        const dur = v.duration;
+    const ext = file.name.split(".").pop()?.toLowerCase() || "";
+    const VIDEO_FORCE_EXTS = ["webm", "mp4", "mov", "avi", "mkv"];
+    const isVideo = file.type.startsWith("video/") || VIDEO_FORCE_EXTS.includes(ext);
+    const isAudio = !isVideo && file.type.startsWith("audio/");
+    const type = isVideo ? "video" : isAudio ? "audio" : "image";
+    setMediaData({ type, data: dataUrl, mimeType: file.type });
+    setAudioData(null);
+    setPreviewMuted(!isAudio);
+    if (isVideo || isAudio) {
+      const el = document.createElement(isVideo ? "video" : "audio");
+      el.src = dataUrl;
+      el.onloadedmetadata = () => {
+        const dur = el.duration;
         setVideoDuration(dur);
-        setTrimStart(0);
         const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
-        setTrimEnd(maxTrim);
+        setSegments([{ start: 0, end: maxTrim }]);
+        setActiveSegment(0);
         setTimeoutMs(Math.round(maxTrim * 1000));
       };
     } else {
       setVideoDuration(0);
-      setTrimStart(0);
-      setTrimEnd(0);
+      setSegments([]);
+      setActiveSegment(0);
     }
   }, []);
 
-  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (re) => loadMediaFile(file, re.target?.result as string);
-    reader.readAsDataURL(file);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }, [loadMediaFile]);
+  const handleFileUpload = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const maxSize = file.type.startsWith("video/") ? MAX_FILE_SIZE.video : file.type.startsWith("audio/") ? MAX_FILE_SIZE.audio : MAX_FILE_SIZE.image;
+      if (file.size > maxSize) {
+        setSendStatus(t("media.file_too_large").replace("{max}", String(Math.round(maxSize / 1024 / 1024))));
+        setTimeout(() => setSendStatus(null), 3000);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (re) => loadMediaFile(file, re.target?.result as string);
+      reader.readAsDataURL(file);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    },
+    [loadMediaFile, t],
+  );
 
-  const handleAudioUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (re) => {
-      const result = re.target?.result as string;
-      setAudioData({
-        data: result.split(",")[1],
-        mimeType: file.type,
-        name: file.name,
-      });
-    };
-    reader.readAsDataURL(file);
-    if (audioInputRef.current) audioInputRef.current.value = "";
-  }, []);
+  const handleAudioUpload = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (file.size > MAX_FILE_SIZE.audio) {
+        setSendStatus(
+          t("media.file_too_large").replace("{max}", String(Math.round(MAX_FILE_SIZE.audio / 1024 / 1024))),
+        );
+        setTimeout(() => setSendStatus(null), 3000);
+        if (audioInputRef.current) audioInputRef.current.value = "";
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = async (re) => {
+        const result = re.target?.result as string;
+        const base64 = result.split(",")[1];
+        setAudioData({ data: base64, mimeType: file.type, name: file.name });
+        // Decode to get duration
+        try {
+          const buf = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer;
+          const ctx = new AudioContext();
+          const decoded = await ctx.decodeAudioData(buf);
+          const dur = decoded.duration;
+          ctx.close();
+          setAudioDuration(dur);
+          setAudioTrimStart(0);
+          setAudioTrimEnd(Math.min(dur, timeoutMs / 1000));
+        } catch { /* fallback: no trim */ }
+      };
+      reader.readAsDataURL(file);
+      if (audioInputRef.current) audioInputRef.current.value = "";
+    },
+    [t, timeoutMs],
+  );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -413,13 +493,25 @@ function MainChat() {
       setIsDragging(false);
       const file = e.dataTransfer.files[0];
       if (!file) return;
-      if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
+      const dropExt = file.name.split(".").pop()?.toLowerCase() || "";
+      const DROP_VID_EXTS = ["webm", "mp4", "mov", "avi", "mkv"];
+      const isDropVideo = file.type.startsWith("video/") || DROP_VID_EXTS.includes(dropExt);
+      const isDropAudio = !isDropVideo && file.type.startsWith("audio/");
+      if (file.type.startsWith("image/") || isDropVideo || isDropAudio) {
+        const maxSize = isDropVideo ? MAX_FILE_SIZE.video : isDropAudio ? MAX_FILE_SIZE.audio : MAX_FILE_SIZE.image;
+        if (file.size > maxSize) {
+          setSendStatus(
+            t("media.file_too_large").replace("{max}", String(Math.round(maxSize / 1024 / 1024))),
+          );
+          setTimeout(() => setSendStatus(null), 3000);
+          return;
+        }
         const reader = new FileReader();
         reader.onload = (re) => loadMediaFile(file, re.target?.result as string);
         reader.readAsDataURL(file);
       }
     },
-    [loadMediaFile]
+    [loadMediaFile, t]
   );
 
   // Global drag & drop via Tauri API
@@ -441,12 +533,44 @@ function MainChat() {
           setGlobalDragging(false);
         } else if (event.payload.type === "drop") {
           setGlobalDragging(false);
-          const paths = event.payload.paths.filter(isMedia);
+          let paths = event.payload.paths.filter(isMedia);
           if (paths.length === 0) return;
 
+          // Limit number of files to prevent crashes
+          if (paths.length > MAX_DROP_FILES) {
+            setSendStatus(t("media.too_many_files").replace("{max}", String(MAX_DROP_FILES)));
+            setTimeout(() => setSendStatus(null), 3000);
+            paths = paths.slice(0, MAX_DROP_FILES);
+          }
+
           const memesFolder = localStorage.getItem("memesFolder");
-          const { readFile } = await import("@tauri-apps/plugin-fs");
+          const { readFile, stat } = await import("@tauri-apps/plugin-fs");
           const { saveToMemesFolder, isFileDuplicateInMemes } = await import("./services/memesUtils");
+
+          // Filter out files that are too large
+          const validPaths: string[] = [];
+          let skippedLarge = 0;
+          for (const p of paths) {
+            try {
+              const info = await stat(p);
+              const maxSize = isVideo(p) ? MAX_FILE_SIZE.video : MAX_FILE_SIZE.image;
+              if (info.size > maxSize) {
+                skippedLarge++;
+              } else {
+                validPaths.push(p);
+              }
+            } catch {
+              skippedLarge++;
+            }
+          }
+          if (skippedLarge > 0) {
+            setSendStatus(
+              t("media.file_too_large").replace("{max}", "500"),
+            );
+            setTimeout(() => setSendStatus(null), 3000);
+          }
+          paths = validPaths;
+          if (paths.length === 0) return;
 
           // Save all files to memes folder with progress (skip duplicates)
           if (memesFolder) {
@@ -472,9 +596,13 @@ function MainChat() {
             try {
               const bytes = await readFile(paths[0]);
               const u8 = new Uint8Array(bytes);
-              let binary = "";
-              for (let i = 0; i < u8.length; i++) binary += String.fromCharCode(u8[i]);
-              const base64 = btoa(binary);
+              // Encode to base64 in chunks to avoid OOM from string concatenation
+              const CHUNK = 0x8000;
+              const parts: string[] = [];
+              for (let i = 0; i < u8.length; i += CHUNK) {
+                parts.push(String.fromCharCode(...u8.subarray(i, i + CHUNK)));
+              }
+              const base64 = btoa(parts.join(""));
               const fileName = paths[0].split("\\").pop() || "";
               const isVid = isVideo(fileName);
               const ext = fileName.split(".").pop()?.toLowerCase() || "";
@@ -497,15 +625,15 @@ function MainChat() {
                 v.onloadedmetadata = () => {
                   const dur = v.duration;
                   setVideoDuration(dur);
-                  setTrimStart(0);
                   const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
-                  setTrimEnd(maxTrim);
+                  setSegments([{ start: 0, end: maxTrim }]);
+                  setActiveSegment(0);
                   setTimeoutMs(Math.round(maxTrim * 1000));
                 };
               } else {
                 setVideoDuration(0);
-                setTrimStart(0);
-                setTrimEnd(0);
+                setSegments([]);
+                setActiveSegment(0);
               }
               setActiveTab("media");
             } catch (err) {
@@ -522,16 +650,31 @@ function MainChat() {
     return () => { if (unlisten) unlisten(); };
   }, [t]);
 
-  const compressVideo = useCallback(async (dataUrl: string, start: number, end: number): Promise<string> => {
+  const compressVideo = useCallback(async (dataUrl: string, segs: { start: number; end: number }[]): Promise<string> => {
     const MAX_WIDTH = 1280;
     const MAX_HEIGHT = 720;
 
+    const blobFromDataUrl = (url: string): Blob => {
+      const [header, b64] = url.split(",");
+      const mime = header.match(/:(.*?);/)?.[1] || "video/mp4";
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new Blob([bytes], { type: mime });
+    };
+
+    const sourceBlob = blobFromDataUrl(dataUrl);
+    const objectUrl = URL.createObjectURL(sourceBlob);
+    const totalDur = totalSegDuration(segs);
+
     return new Promise((resolve, reject) => {
+      const cleanup = () => URL.revokeObjectURL(objectUrl);
+
       const video = document.createElement("video");
       video.playsInline = true;
       video.muted = false;
       video.volume = 1;
-      video.src = dataUrl;
+      video.src = objectUrl;
 
       video.onloadedmetadata = () => {
         let w = video.videoWidth;
@@ -550,66 +693,142 @@ function MainChat() {
         const ctx = canvas.getContext("2d")!;
 
         const stream = canvas.captureStream(30);
+        let audioCtx: AudioContext | null = null;
         try {
-          const audioCtx = new AudioContext();
+          audioCtx = new AudioContext();
           const source = audioCtx.createMediaElementSource(video);
           const dest = audioCtx.createMediaStreamDestination();
           source.connect(dest);
           dest.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
-          console.log("[COMPRESS] Audio tracks added:", dest.stream.getAudioTracks().length);
         } catch (e) {
           console.warn("[COMPRESS] No audio track captured:", e);
         }
 
+        const bitrate = totalDur > 20 ? 1_000_000 : 2_000_000;
         const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
           ? "video/webm;codecs=vp9"
           : "video/webm";
-        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 2_000_000 });
+        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
 
         const chunks: Blob[] = [];
-        recorder.ondataavailable = (e) => {
-          if (e.data.size > 0) chunks.push(e.data);
-        };
+        recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
         recorder.onstop = () => {
+          cleanup();
+          audioCtx?.close().catch(() => {});
           const blob = new Blob(chunks, { type: "video/webm" });
+          chunks.length = 0;
           const reader = new FileReader();
           reader.onload = () => resolve(reader.result as string);
           reader.onerror = () => reject(new Error("Failed to read compressed video"));
           reader.readAsDataURL(blob);
         };
 
-        recorder.onerror = () => reject(new Error("MediaRecorder error"));
+        recorder.onerror = () => { cleanup(); audioCtx?.close().catch(() => {}); reject(new Error("MediaRecorder error")); };
 
-        const clipDuration = end - start;
+        let segIdx = 0;
+        let elapsed = 0;
         let lastProgress = 0;
 
-        const drawFrame = () => {
-          if (video.paused || video.ended || video.currentTime >= end) {
-            ctx.drawImage(video, 0, 0, w, h);
+        const playSegment = () => {
+          if (segIdx >= segs.length) {
             video.pause();
             setTimeout(() => recorder.stop(), 100);
             return;
           }
-          ctx.drawImage(video, 0, 0, w, h);
-          const progress = Math.round(((video.currentTime - start) / clipDuration) * 100);
-          if (progress !== lastProgress) {
-            lastProgress = progress;
-            setCompressProgress(Math.min(progress, 100));
-          }
-          requestAnimationFrame(drawFrame);
+          const seg = segs[segIdx];
+          video.currentTime = seg.start;
+          video.onseeked = () => {
+            video.onseeked = null;
+            video.play().then(() => {
+              const drawFrame = () => {
+                if (video.paused || video.ended || video.currentTime >= seg.end) {
+                  ctx.drawImage(video, 0, 0, w, h);
+                  video.pause();
+                  elapsed += seg.end - seg.start;
+                  segIdx++;
+                  playSegment();
+                  return;
+                }
+                ctx.drawImage(video, 0, 0, w, h);
+                const progress = Math.round(((elapsed + video.currentTime - seg.start) / totalDur) * 100);
+                if (progress !== lastProgress) { lastProgress = progress; setCompressProgress(Math.min(progress, 100)); }
+                requestAnimationFrame(drawFrame);
+              };
+              drawFrame();
+            }).catch((err) => { cleanup(); reject(err); });
+          };
         };
 
-        // Seek to trim start, then play
-        video.currentTime = start;
-        video.onseeked = () => {
-          recorder.start();
-          video.play().then(drawFrame).catch(reject);
-          video.onseeked = null;
-        };
+        recorder.start(1000);
+        playSegment();
       };
 
-      video.onerror = () => reject(new Error("Video load error"));
+      video.onerror = () => { cleanup(); reject(new Error("Video load error")); };
+    });
+  }, []);
+
+  const trimAudio = useCallback(async (dataUrl: string, segs: { start: number; end: number }[]): Promise<string> => {
+    const response = await fetch(dataUrl);
+    const arrayBuffer = await response.arrayBuffer();
+    const audioCtx = new AudioContext();
+    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+    const sampleRate = decoded.sampleRate;
+    const numChannels = decoded.numberOfChannels;
+
+    // Render each segment and concatenate
+    const renderedBuffers: AudioBuffer[] = [];
+    for (const seg of segs) {
+      const length = Math.floor((seg.end - seg.start) * sampleRate);
+      if (length <= 0) continue;
+      const offCtx = new OfflineAudioContext(numChannels, length, sampleRate);
+      const src = offCtx.createBufferSource();
+      src.buffer = decoded;
+      src.connect(offCtx.destination);
+      src.start(0, seg.start, seg.end - seg.start);
+      renderedBuffers.push(await offCtx.startRendering());
+    }
+    audioCtx.close();
+
+    const totalSamples = renderedBuffers.reduce((s, b) => s + b.length, 0);
+    const bitsPerSample = 16;
+    const blockAlign = numChannels * (bitsPerSample / 8);
+    const dataSize = totalSamples * blockAlign;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    const writeString = (off: number, str: string) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+    writeString(0, "RIFF");
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, "WAVE");
+    writeString(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(36, "data");
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (const rendered of renderedBuffers) {
+      for (let i = 0; i < rendered.length; i++) {
+        for (let ch = 0; ch < numChannels; ch++) {
+          const sample = Math.max(-1, Math.min(1, rendered.getChannelData(ch)[i]));
+          view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+          offset += 2;
+        }
+      }
+    }
+
+    const blob = new Blob([buffer], { type: "audio/wav" });
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error("Failed to read trimmed audio"));
+      reader.readAsDataURL(blob);
     });
   }, []);
 
@@ -629,7 +848,7 @@ function MainChat() {
       setCompressing(true);
       setCompressProgress(0);
       try {
-        const compressed = await compressVideo(mediaData.data, trimStart, trimEnd);
+        const compressed = await compressVideo(mediaData.data, segments);
         mediaBuffer = compressed.split(",")[1];
         mimeType = "video/webm";
       } catch (err) {
@@ -639,19 +858,50 @@ function MainChat() {
         return;
       }
       setCompressing(false);
+    } else if (mediaData.type === "audio") {
+      // Trim audio before sending
+      setCompressing(true);
+      try {
+        const trimmed = await trimAudio(mediaData.data, segments);
+        mediaBuffer = trimmed.split(",")[1];
+        mimeType = "audio/wav";
+      } catch (err) {
+        console.error("Audio trim failed:", err);
+        setSendStatus(t("media.compress_error"));
+        setCompressing(false);
+        return;
+      }
+      setCompressing(false);
     } else {
       mediaBuffer = mediaData.data.split(",")[1];
     }
 
+    // Trim audio overlay if present (for images)
+    let trimmedAudioOverlay: string | undefined;
+    if (mediaData.type === "image" && audioData) {
+      try {
+        const audioDataUrl = `data:${audioData.mimeType};base64,${audioData.data}`;
+        const trimmed = await trimAudio(audioDataUrl, [{ start: audioTrimStart, end: audioTrimEnd }]);
+        trimmedAudioOverlay = trimmed.split(",")[1];
+      } catch (err) {
+        console.error("Audio overlay trim failed:", err);
+        trimmedAudioOverlay = audioData.data;
+      }
+    }
+
+    const finalTargets = selfDefault && user && !selectedTargets.includes(user.id)
+      ? [...selectedTargets, user.id]
+      : selectedTargets;
+
     socketRef.current.emit("broadcast_media", {
-      targetIds: selectedTargets,
+      targetIds: finalTargets,
       mediaType: mediaData.type,
       mediaBuffer,
       mimeType,
       duration: timeoutMs,
       textOverlay: hasText && (textPosition === "around" || mediaData.type === "video") ? { ...textData, fontSize: textSize, position: textPosition } : undefined,
-      audioBuffer: mediaData.type === "image" ? audioData?.data : undefined,
-      audioMimeType: mediaData.type === "image" ? audioData?.mimeType : undefined,
+      audioBuffer: trimmedAudioOverlay,
+      audioMimeType: trimmedAudioOverlay ? "audio/wav" : undefined,
     });
 
     // Save to history
@@ -683,7 +933,7 @@ function MainChat() {
     } catch (err) {
       console.error("Auto-save to memes folder failed:", err);
     }
-  }, [selectedTargets, mediaData, textData, timeoutMs, audioData, createPreview, compressVideo, trimStart, trimEnd]);
+  }, [selectedTargets, mediaData, textData, timeoutMs, audioData, audioTrimStart, audioTrimEnd, createPreview, compressVideo, trimAudio, segments]);
 
   const handleTargetToggle = (id: string) => {
     setSelectedTargets((prev) =>
@@ -775,25 +1025,32 @@ function MainChat() {
   const handleInviteLink = useCallback((link: string) => {
     const trimmed = link.trim();
 
-    // Friend link: shitpost://friend/USERNAME
-    const friendMatch = trimmed.match(/^shitpost:\/\/friend\/(.+)$/);
+    // Friend link: shitpost://friend/CODE or raw CODE (hex 8 chars)
+    const friendMatch = trimmed.match(/^shitpost:\/\/friend\/(.+)$/) || trimmed.match(/^([A-Fa-f0-9]{8})$/);
     if (friendMatch) {
-      const username = decodeURIComponent(friendMatch[1]);
-      if (username === user?.username) return;
-      setConfirmAction({
-        message: `${t("friends.confirm_add")}\n${username}`,
-        onConfirm: async () => {
-          try {
-            await api.post("/friends/add-direct", { username });
-            fetchData();
-            setSendStatus(t("friends.accept"));
-            setTimeout(() => setSendStatus(null), 2000);
-          } catch (err: any) {
-            setSendStatus(err.response?.data?.message || t("general.error"));
-            setTimeout(() => setSendStatus(null), 3000);
-          }
-          setConfirmAction(null);
-        },
+      const code = friendMatch[1].toUpperCase();
+      // Resolve invite code to username before showing confirm
+      api.get(`/friends/resolve/${code}`).then((res) => {
+        const { username } = res.data;
+        if (username === user?.username) return;
+        setConfirmAction({
+          message: `${t("friends.confirm_add")}\n${username}`,
+          onConfirm: async () => {
+            try {
+              await api.post("/friends/add-direct", { code });
+              fetchData();
+              setSendStatus(t("friends.request_sent"));
+              setTimeout(() => setSendStatus(null), 2000);
+            } catch (err: any) {
+              setSendStatus(err.response?.data?.message || t("general.error"));
+              setTimeout(() => setSendStatus(null), 3000);
+            }
+            setConfirmAction(null);
+          },
+        });
+      }).catch(() => {
+        setSendStatus(t("general.error"));
+        setTimeout(() => setSendStatus(null), 2000);
       });
       return;
     }
@@ -961,12 +1218,26 @@ function MainChat() {
           title={socketConnected ? t("general.connected") : t("friends.offline")}
         />
         {/* User */}
-        <div className="flex items-center gap-1.5">
-          <div
-            className="cartoon-avatar"
-            style={{ background: getAvatarColor(user?.username || ""), width: 24, height: 24, fontSize: 10 }}
-          >
-            {user?.username?.[0]?.toUpperCase()}
+        <div
+          className="flex items-center gap-1.5 cursor-pointer rounded-lg px-1.5 py-1 hover:opacity-80"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setUserContextMenu({ x: e.clientX, y: e.clientY });
+          }}
+        >
+          <div className="relative">
+            <div
+              className="cartoon-avatar"
+              style={{ background: getAvatarColor(user?.username || ""), width: 24, height: 24, fontSize: 10 }}
+            >
+              {user?.username?.[0]?.toUpperCase()}
+            </div>
+            {dndEnabled && (
+              <div
+                className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2"
+                style={{ background: "var(--accent-red)", borderColor: "var(--bg-sidebar)" }}
+              />
+            )}
           </div>
           <span className="font-bold text-xs" style={{ color: "var(--text-white)" }}>
             {user?.username}
@@ -1266,6 +1537,53 @@ function MainChat() {
         </div>
       )}
 
+      {/* User context menu (titlebar) */}
+      {userContextMenu && (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={() => setUserContextMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setUserContextMenu(null); }}
+        >
+          <div
+            className="absolute cartoon-card py-1"
+            style={{
+              left: userContextMenu.x,
+              top: userContextMenu.y,
+              minWidth: 180,
+              boxShadow: "var(--shadow-cartoon)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => {
+                const newVal = !dndEnabled;
+                socketRef.current?.emit("status:set_dnd", newVal);
+                setDndEnabled(newVal);
+                setUserContextMenu(null);
+              }}
+              className="w-full text-left px-4 py-2 text-xs hover:opacity-80 flex items-center gap-2"
+              style={{ color: "var(--text-white)" }}
+            >
+              <Icons.Moon size={12} /> {dndEnabled ? t("settings.dnd_disable") : t("settings.dnd")}
+            </button>
+            <div style={{ height: 1, background: "var(--border-card)", margin: "2px 8px" }} />
+            <button
+              onClick={() => {
+                setUserContextMenu(null);
+                setConfirmAction({
+                  message: t("settings.logout_confirm"),
+                  onConfirm: () => { logout(); navigate("/login"); setConfirmAction(null); },
+                });
+              }}
+              className="w-full text-left px-4 py-2 text-xs hover:opacity-80 flex items-center gap-2"
+              style={{ color: "var(--accent-red)" }}
+            >
+              <Icons.Trash size={12} /> {t("sidebar.logout")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Friend context menu */}
       {contextMenu && (
         <div
@@ -1317,7 +1635,7 @@ function MainChat() {
                   setInviteLinkModal(false);
                 }
               }}
-              placeholder="shitpost://friend/... or shitpost://group/..."
+              placeholder="A1B2C3D4 or shitpost://group/..."
               className="cartoon-input w-full mb-4 text-sm"
               autoFocus
             />
@@ -1389,7 +1707,86 @@ function MainChat() {
                 {previewUrl ? (
                   <div className="relative w-full" style={{ flex: "1 1 0%", minHeight: 0 }}>
                     {mediaData?.type === "image" ? (
-                      <img src={previewUrl} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />
+                      <>
+                        <img src={previewUrl} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />
+                        {audioData && (
+                          <>
+                            <audio
+                              ref={audioOverlayRef}
+                              src={`data:${audioData.mimeType};base64,${audioData.data}`}
+                              autoPlay
+                              loop
+                              style={{ display: "none" }}
+                              onLoadedMetadata={(e) => {
+                                const el = e.currentTarget;
+                                el.currentTime = audioTrimStart;
+                                el.volume = audioOverlayMuted ? 0 : memeVolume / 100;
+                              }}
+                              onTimeUpdate={(e) => {
+                                const el = e.currentTarget;
+                                if (el.currentTime >= audioTrimEnd || el.currentTime < audioTrimStart - 0.5) {
+                                  el.currentTime = audioTrimStart;
+                                }
+                              }}
+                            />
+                            <button
+                              onClick={() => {
+                                setAudioOverlayMuted((m) => {
+                                  const next = !m;
+                                  if (audioOverlayRef.current) audioOverlayRef.current.volume = next ? 0 : memeVolume / 100;
+                                  return next;
+                                });
+                              }}
+                              className="absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center"
+                              style={{ background: "rgba(0,0,0,0.7)", border: "2px solid rgba(255,255,255,0.3)", zIndex: 2, cursor: "pointer" }}
+                            >
+                              {audioOverlayMuted ? <Icons.Muted size={14} className="text-white" /> : <Icons.Volume size={14} className="text-white" />}
+                            </button>
+                          </>
+                        )}
+                      </>
+                    ) : mediaData?.type === "audio" ? (
+                      <div className="flex flex-col items-center justify-center gap-3" style={{ position: "absolute", inset: 0 }}>
+                        <div
+                          className="w-20 h-20 rounded-full flex items-center justify-center"
+                          style={{ background: "var(--accent-purple)", border: "3px solid #000", boxShadow: "var(--shadow-cartoon)" }}
+                        >
+                          <Icons.Music size={36} className="text-white" />
+                        </div>
+                        <p className="text-xs font-bold" style={{ color: "var(--text-muted)" }}>
+                          {videoDuration > 0 ? `${videoDuration.toFixed(1)}s` : ""}
+                        </p>
+                        <audio
+                          ref={(el) => {
+                            (previewVideoRef as React.MutableRefObject<HTMLAudioElement | HTMLVideoElement | null>).current = el;
+                            if (el) {
+                              el.volume = previewMuted ? 0 : memeVolume / 100;
+                            }
+                          }}
+                          src={previewUrl}
+                          autoPlay
+                          onLoadedMetadata={() => {
+                            if (previewVideoRef.current && segments.length > 0) {
+                              segmentPlayRef.current = 0;
+                              previewVideoRef.current.currentTime = segments[0].start;
+                            }
+                          }}
+                          onTimeUpdate={() => {
+                            const v = previewVideoRef.current;
+                            if (!v || segments.length === 0) return;
+                            setPlayheadTime(v.currentTime);
+                            const idx = segmentPlayRef.current;
+                            const seg = segments[idx];
+                            if (seg && v.currentTime >= seg.end) {
+                              const next = (idx + 1) % segments.length;
+                              segmentPlayRef.current = next;
+                              v.currentTime = segments[next].start;
+                              v.play();
+                            }
+                          }}
+                          style={{ display: "none" }}
+                        />
+                      </div>
                     ) : (
                       <video
                         ref={(el) => {
@@ -1401,14 +1798,20 @@ function MainChat() {
                         muted={previewMuted}
                         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
                         onLoadedMetadata={() => {
-                          if (previewVideoRef.current && trimStart > 0) {
-                            previewVideoRef.current.currentTime = trimStart;
+                          if (previewVideoRef.current && segments.length > 0) {
+                            segmentPlayRef.current = 0;
+                            previewVideoRef.current.currentTime = segments[0].start;
                           }
                         }}
                         onTimeUpdate={() => {
                           const v = previewVideoRef.current;
-                          if (v && trimEnd > 0 && v.currentTime >= trimEnd) {
-                            v.currentTime = trimStart;
+                          if (!v || segments.length === 0) return;
+                          const idx = segmentPlayRef.current;
+                          const seg = segments[idx];
+                          if (seg && v.currentTime >= seg.end) {
+                            const next = (idx + 1) % segments.length;
+                            segmentPlayRef.current = next;
+                            v.currentTime = segments[next].start;
                             v.play();
                           }
                         }}
@@ -1421,7 +1824,7 @@ function MainChat() {
                           <div style={{
                             position: "absolute", top: 8, left: 0, right: 0, textAlign: "center", zIndex: 1,
                             fontSize: textSize * 0.45, fontWeight: 900, fontFamily: "'Impact', 'Charcoal', sans-serif",
-                            color: "#fff", letterSpacing: 1,
+                            color: "#fff", letterSpacing: 1, whiteSpace: "pre-line",
                             textShadow: "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000",
                             pointerEvents: "none",
                           }}>
@@ -1432,7 +1835,7 @@ function MainChat() {
                           <div style={{
                             position: "absolute", bottom: 8, left: 0, right: 0, textAlign: "center", zIndex: 1,
                             fontSize: textSize * 0.45, fontWeight: 900, fontFamily: "'Impact', 'Charcoal', sans-serif",
-                            color: "#fff", letterSpacing: 1,
+                            color: "#fff", letterSpacing: 1, whiteSpace: "pre-line",
                             textShadow: "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000",
                             pointerEvents: "none",
                           }}>
@@ -1441,9 +1844,22 @@ function MainChat() {
                         )}
                       </>
                     )}
-                    {mediaData?.type === "video" && (
+                    {(mediaData?.type === "video" || mediaData?.type === "audio") && (
                       <button
-                        onClick={() => setPreviewMuted((m) => !m)}
+                        onClick={() => {
+                          setPreviewMuted((m) => {
+                            const next = !m;
+                            const el = previewVideoRef.current;
+                            if (el) {
+                              if (mediaData?.type === "audio") {
+                                el.volume = next ? 0 : memeVolume / 100;
+                              } else {
+                                (el as HTMLVideoElement).muted = next;
+                              }
+                            }
+                            return next;
+                          });
+                        }}
                         className="absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center"
                         style={{ background: "rgba(0,0,0,0.7)", border: "2px solid rgba(255,255,255,0.3)", zIndex: 2, pointerEvents: "auto", cursor: "pointer" }}
                       >
@@ -1451,7 +1867,7 @@ function MainChat() {
                       </button>
                     )}
                     <button
-                      onClick={() => { setMediaData(null); setAudioData(null); setTextData({ topText: "", bottomText: "" }); setPreviewMuted(true); }}
+                      onClick={() => { setMediaData(null); setAudioData(null); setTextData({ topText: "", bottomText: "" }); setPreviewMuted(true); setAudioOverlayMuted(false); }}
                       className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center"
                       style={{ background: "var(--accent-red)", border: "2px solid #000", boxShadow: "var(--shadow-cartoon-sm)", zIndex: 2 }}
                     >
@@ -1469,7 +1885,7 @@ function MainChat() {
                     <p className="font-bold text-sm mb-1" style={{ color: "var(--text-gray)" }}>
                       {t("media.drop_here")}
                     </p>
-                    <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="image/*,video/*" />
+                    <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="image/*,video/*,audio/*" />
                     <button
                       onClick={() => fileInputRef.current?.click()}
                       className="cartoon-btn px-5 py-2 text-sm"
@@ -1490,22 +1906,24 @@ function MainChat() {
                 {/* Text inputs */}
                 <div>
                   <label className="text-xs font-bold mb-1 block" style={{ color: "var(--text-muted)" }}>{t("media.top_text").toUpperCase()}</label>
-                  <input
-                    type="text"
+                  <textarea
                     value={textData.topText}
                     onChange={(e) => setTextData((p) => ({ ...p, topText: e.target.value }))}
                     className="cartoon-input w-full text-xs py-1.5"
                     placeholder="IMPACT TEXT..."
+                    rows={2}
+                    style={{ resize: "none" }}
                   />
                 </div>
                 <div>
                   <label className="text-xs font-bold mb-1 block" style={{ color: "var(--text-muted)" }}>{t("media.bottom_text").toUpperCase()}</label>
-                  <input
-                    type="text"
+                  <textarea
                     value={textData.bottomText}
                     onChange={(e) => setTextData((p) => ({ ...p, bottomText: e.target.value }))}
                     className="cartoon-input w-full text-xs py-1.5"
                     placeholder="BOTTOM TEXT..."
+                    rows={2}
+                    style={{ resize: "none" }}
                   />
                 </div>
 
@@ -1569,19 +1987,113 @@ function MainChat() {
                       {audioData ? audioData.name : t("media.choose_audio")}
                     </button>
                     {audioData && (
-                      <button
-                        onClick={() => setAudioData(null)}
-                        className="cartoon-btn w-full px-3 py-1 text-xs mt-1"
-                        style={{ background: "var(--bg-input)", color: "var(--accent-red)" }}
-                      >
-                        {t("media.remove_audio")}
-                      </button>
+                      <>
+                        <button
+                          onClick={() => { setAudioData(null); setAudioDuration(0); setAudioTrimStart(0); setAudioTrimEnd(0); setAudioOverlayMuted(false); }}
+                          className="cartoon-btn w-full px-3 py-1 text-xs mt-1"
+                          style={{ background: "var(--bg-input)", color: "var(--accent-red)" }}
+                        >
+                          {t("media.remove_audio")}
+                        </button>
+
+                        {/* Audio overlay trim */}
+                        {audioDuration > 0 && (
+                          <div className="mt-1.5">
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+                                <Icons.Music size={11} /> DECOUPE AUDIO
+                              </label>
+                              <span
+                                className="cartoon-badge text-xs"
+                                style={{ background: "var(--accent-purple)", color: "#fff", borderColor: "#000", padding: "1px 8px" }}
+                              >
+                                {audioTrimStart.toFixed(1)}s → {audioTrimEnd.toFixed(1)}s ({(audioTrimEnd - audioTrimStart).toFixed(1)}s)
+                              </span>
+                            </div>
+                            {/* Barre principale — drag uniquement */}
+                            <div
+                              className="relative rounded-t-lg"
+                              style={{ height: 28, background: "var(--bg-input)", border: "2px solid var(--border-card)", borderBottom: "none", cursor: "grab", userSelect: "none" }}
+                              onMouseDown={(e) => {
+                                const track = e.currentTarget;
+                                const rect = track.getBoundingClientRect();
+                                const pxToTime = (px: number) => Math.max(0, Math.min(audioDuration, (px / rect.width) * audioDuration));
+                                const clickTime = pxToTime(e.clientX - rect.left);
+                                const clipLen = audioTrimEnd - audioTrimStart;
+                                const moveOffset = clickTime - audioTrimStart;
+
+                                const onMove = (ev: MouseEvent) => {
+                                  const t = pxToTime(ev.clientX - rect.left);
+                                  let ns = t - moveOffset;
+                                  ns = Math.max(0, Math.min(ns, audioDuration - clipLen));
+                                  setAudioTrimStart(ns);
+                                  setAudioTrimEnd(ns + clipLen);
+                                };
+                                const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+                                window.addEventListener("mousemove", onMove);
+                                window.addEventListener("mouseup", onUp);
+                                onMove(e.nativeEvent);
+                              }}
+                            >
+                              {/* Inactive left */}
+                              <div className="absolute top-0 bottom-0 left-0 rounded-l-md" style={{ width: `${(audioTrimStart / audioDuration) * 100}%`, background: "rgba(0,0,0,0.35)" }} />
+                              {/* Active zone */}
+                              <div className="absolute top-0 bottom-0" style={{ left: `${(audioTrimStart / audioDuration) * 100}%`, width: `${((audioTrimEnd - audioTrimStart) / audioDuration) * 100}%`, background: "var(--accent-purple)", opacity: 0.35 }} />
+                              {/* Inactive right */}
+                              <div className="absolute top-0 bottom-0 right-0 rounded-r-md" style={{ width: `${((audioDuration - audioTrimEnd) / audioDuration) * 100}%`, background: "rgba(0,0,0,0.35)" }} />
+                              {/* Start handle */}
+                              <div className="absolute top-0 bottom-0 flex items-center justify-center" style={{ left: `${(audioTrimStart / audioDuration) * 100}%`, transform: "translateX(-50%)", width: 14, zIndex: 4, pointerEvents: "none" }}>
+                                <div style={{ width: 4, height: 16, borderRadius: 2, background: "var(--accent-purple)", border: "1px solid #000" }} />
+                              </div>
+                              {/* End handle */}
+                              <div className="absolute top-0 bottom-0 flex items-center justify-center" style={{ left: `${(audioTrimEnd / audioDuration) * 100}%`, transform: "translateX(-50%)", width: 14, zIndex: 4, pointerEvents: "none" }}>
+                                <div style={{ width: 4, height: 16, borderRadius: 2, background: "var(--accent-purple)", border: "1px solid #000" }} />
+                              </div>
+                            </div>
+                            {/* Barre du bas — resize */}
+                            <div
+                              className="relative rounded-b-lg"
+                              style={{ height: 16, cursor: "ew-resize", userSelect: "none", background: "var(--bg-input)", borderLeft: "2px solid var(--border-card)", borderRight: "2px solid var(--border-card)", borderBottom: "2px solid var(--border-card)", marginTop: -2 }}
+                              onMouseDown={(e) => {
+                                const track = e.currentTarget;
+                                const rect = track.getBoundingClientRect();
+                                const pxToTime = (px: number) => Math.max(0, Math.min(audioDuration, (px / rect.width) * audioDuration));
+                                const clickTime = pxToTime(e.clientX - rect.left);
+                                const mid = (audioTrimStart + audioTrimEnd) / 2;
+                                const side: "left" | "right" = clickTime < mid ? "left" : "right";
+
+                                const maxClip = timeoutMs / 1000;
+                                const onMove = (ev: MouseEvent) => {
+                                  const t = pxToTime(ev.clientX - rect.left);
+                                  if (side === "left") {
+                                    const v = Math.max(Math.max(0, audioTrimEnd - maxClip), Math.min(t, audioTrimEnd - 0.5));
+                                    setAudioTrimStart(v);
+                                  } else {
+                                    const v = Math.min(Math.min(audioDuration, audioTrimStart + maxClip), Math.max(t, audioTrimStart + 0.5));
+                                    setAudioTrimEnd(v);
+                                  }
+                                };
+                                const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+                                window.addEventListener("mousemove", onMove);
+                                window.addEventListener("mouseup", onUp);
+                                onMove(e.nativeEvent);
+                              }}
+                            >
+                              {/* Mirrored range indicator */}
+                              <div className="absolute top-0 bottom-0" style={{ left: `${(audioTrimStart / audioDuration) * 100}%`, width: `${((audioTrimEnd - audioTrimStart) / audioDuration) * 100}%`, background: "var(--accent-purple)", opacity: 0.15 }} />
+                              <div className="absolute inset-0 flex items-center justify-center" style={{ fontSize: 8, color: "var(--text-muted)", fontWeight: 700, pointerEvents: "none" }}>
+                                {audioTrimStart.toFixed(1)}s → {audioTrimEnd.toFixed(1)}s
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 )}
 
-                {/* Video Trim */}
-                {mediaData?.type === "video" && videoDuration > 0 && (
+                {/* Multi-segment Trim Editor */}
+                {(mediaData?.type === "video" || mediaData?.type === "audio") && videoDuration > 0 && segments.length > 0 && (
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <label className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
@@ -1589,62 +2101,214 @@ function MainChat() {
                       </label>
                       <span
                         className="cartoon-badge text-xs"
-                        style={{ background: "var(--accent-cyan)", color: "#000", borderColor: "#000", padding: "1px 8px" }}
+                        style={{ background: segColor(activeSegment), color: "#000", borderColor: "#000", padding: "1px 8px" }}
                       >
-                        {trimStart.toFixed(1)}s → {trimEnd.toFixed(1)}s ({(trimEnd - trimStart).toFixed(1)}s)
+                        {totalSegDuration(segments).toFixed(1)}s total
                       </span>
                     </div>
+
+                    {/* Segment badges */}
+                    <div className="flex flex-wrap items-center gap-1 mb-1.5">
+                      {segments.map((seg, i) => (
+                        <div
+                          key={i}
+                          className="flex items-center gap-1 px-1.5 py-0.5 rounded-lg cursor-pointer transition-all"
+                          style={{
+                            background: i === activeSegment ? segColor(i) : "var(--bg-input)",
+                            color: i === activeSegment ? "#000" : "var(--text-muted)",
+                            border: `2px solid ${i === activeSegment ? segColor(i) : "var(--border-card)"}`,
+                            fontSize: 10,
+                            fontWeight: 700,
+                          }}
+                          onClick={() => {
+                            setActiveSegment(i);
+                            if (previewVideoRef.current) previewVideoRef.current.currentTime = seg.start;
+                          }}
+                        >
+                          <div style={{ width: 6, height: 6, borderRadius: "50%", background: segColor(i) }} />
+                          {seg.start.toFixed(1)}s→{seg.end.toFixed(1)}s
+                          {segments.length > 1 && (
+                            <span
+                              className="ml-0.5 hover:text-red-400 cursor-pointer"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const next = segments.filter((_, j) => j !== i);
+                                setSegments(next);
+                                setActiveSegment(Math.min(activeSegment, next.length - 1));
+                                const td = totalSegDuration(next);
+                                setTimeoutMs(Math.min(Math.round(td * 1000), TIMEOUT_LIMITS.maxVideo));
+                              }}
+                            >
+                              ×
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                      {segments.length < 6 && totalSegDuration(segments) < TIMEOUT_LIMITS.maxVideo / 1000 && (
+                        <button
+                          className="flex items-center justify-center rounded-lg transition-all hover:scale-110"
+                          style={{
+                            width: 22, height: 22,
+                            background: "var(--bg-input)",
+                            border: "2px solid var(--border-card)",
+                            color: "var(--text-muted)",
+                            fontSize: 14,
+                            fontWeight: 700,
+                          }}
+                          onClick={() => {
+                            const maxTotal = TIMEOUT_LIMITS.maxVideo / 1000;
+                            const remaining = maxTotal - totalSegDuration(segments);
+                            if (remaining < 0.5) return;
+                            // Find first gap between sorted segments
+                            const sorted = [...segments].sort((a, b) => a.start - b.start);
+                            let gapStart = 0;
+                            let gapLen = 0;
+                            for (const sg of sorted) {
+                              if (sg.start - gapStart >= 0.5) { gapLen = sg.start - gapStart; break; }
+                              gapStart = Math.max(gapStart, sg.end);
+                            }
+                            if (gapLen === 0) gapLen = videoDuration - gapStart;
+                            if (gapLen < 0.5) return;
+                            const segLen = Math.min(remaining, 2, gapLen);
+                            const newSeg = { start: gapStart, end: gapStart + segLen };
+                            const next = [...segments, newSeg];
+                            setSegments(next);
+                            setActiveSegment(next.length - 1);
+                            const td = totalSegDuration(next);
+                            setTimeoutMs(Math.min(Math.round(td * 1000), TIMEOUT_LIMITS.maxVideo));
+                          }}
+                        >
+                          +
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Timeline track */}
                     <div
-                      className="relative rounded-lg"
-                      style={{ height: 32, background: "var(--bg-input)", border: "2px solid var(--border-card)", cursor: "default", userSelect: "none" }}
+                      className="relative rounded-t-lg"
+                      style={{ height: 32, background: "var(--bg-input)", border: "2px solid var(--border-card)", borderBottom: "none", userSelect: "none" }}
+                      onMouseMove={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const mouseX = e.clientX - rect.left;
+                        const seg = segments[activeSegment];
+                        if (!seg) { e.currentTarget.style.cursor = "default"; return; }
+                        const startPx = (seg.start / videoDuration) * rect.width;
+                        const endPx = (seg.end / videoDuration) * rect.width;
+                        const HZ = 12;
+                        if (Math.abs(mouseX - startPx) <= HZ || Math.abs(mouseX - endPx) <= HZ) {
+                          e.currentTarget.style.cursor = "ew-resize";
+                        } else if (mouseX > startPx + HZ && mouseX < endPx - HZ) {
+                          e.currentTarget.style.cursor = "grab";
+                        } else {
+                          e.currentTarget.style.cursor = "default";
+                        }
+                      }}
                       onMouseDown={(e) => {
                         const track = e.currentTarget;
                         const rect = track.getBoundingClientRect();
                         const pxToTime = (px: number) => Math.max(0, Math.min(videoDuration, (px / rect.width) * videoDuration));
                         const clickTime = pxToTime(e.clientX - rect.left);
-                        const startPx = (trimStart / videoDuration) * rect.width;
-                        const endPx = (trimEnd / videoDuration) * rect.width;
                         const mouseX = e.clientX - rect.left;
+                        const seg = segments[activeSegment];
+                        if (!seg) return;
 
+                        const startPx = (seg.start / videoDuration) * rect.width;
+                        const endPx = (seg.end / videoDuration) * rect.width;
+                        const playheadPx = (playheadTime / videoDuration) * rect.width;
                         const HANDLE_ZONE = 12;
-                        let mode: "start" | "end" | "move";
-                        if (Math.abs(mouseX - startPx) <= HANDLE_ZONE) {
+
+                        let mode: "start" | "end" | "move" | "playhead";
+                        const nearStart = Math.abs(mouseX - startPx) <= HANDLE_ZONE;
+                        const nearEnd = Math.abs(mouseX - endPx) <= HANDLE_ZONE;
+                        const insideSegment = mouseX > startPx + HANDLE_ZONE && mouseX < endPx - HANDLE_ZONE;
+                        // Playhead handle has priority when outside segment
+                        if (!nearStart && !nearEnd && !insideSegment && Math.abs(mouseX - playheadPx) <= 8) {
+                          mode = "playhead";
+                        } else if (nearStart && nearEnd) {
+                          // Both handles overlap (tiny segment) — use closest
+                          mode = Math.abs(mouseX - startPx) <= Math.abs(mouseX - endPx) ? "start" : "end";
+                        } else if (nearStart) {
                           mode = "start";
-                        } else if (Math.abs(mouseX - endPx) <= HANDLE_ZONE) {
+                        } else if (nearEnd) {
                           mode = "end";
-                        } else if (mouseX > startPx && mouseX < endPx) {
+                        } else if (insideSegment) {
                           mode = "move";
                         } else {
-                          // Click outside: snap nearest handle
-                          mode = Math.abs(clickTime - trimStart) < Math.abs(clickTime - trimEnd) ? "start" : "end";
+                          // Click on another segment?
+                          for (let i = 0; i < segments.length; i++) {
+                            const s = segments[i];
+                            const sLeft = (s.start / videoDuration) * rect.width;
+                            const sRight = (s.end / videoDuration) * rect.width;
+                            if (mouseX >= sLeft && mouseX <= sRight) {
+                              setActiveSegment(i);
+                              if (previewVideoRef.current) previewVideoRef.current.currentTime = s.start;
+                              return;
+                            }
+                          }
+                          // Click on empty space = seek playhead
+                          mode = "playhead";
                         }
 
-                        const clipLen = trimEnd - trimStart;
-                        const moveOffset = clickTime - trimStart;
+                        const segIdx = activeSegment;
+                        const clipLen = seg.end - seg.start;
+                        const moveOffset = clickTime - seg.start;
 
                         const onMove = (ev: MouseEvent) => {
                           const t = pxToTime(ev.clientX - rect.left);
-                          const maxClip = TIMEOUT_LIMITS.maxVideo / 1000;
-                          if (mode === "start") {
-                            const v = Math.max(0, Math.min(t, trimEnd - 0.5));
-                            const newEnd = trimEnd;
-                            if (newEnd - v > maxClip) return;
-                            setTrimStart(v);
-                            setTimeoutMs(Math.min(Math.round((newEnd - v) * 1000), TIMEOUT_LIMITS.maxVideo));
-                            if (previewVideoRef.current) previewVideoRef.current.currentTime = v;
-                          } else if (mode === "end") {
-                            const v = Math.min(videoDuration, Math.max(t, trimStart + 0.5));
-                            const clamped = Math.min(v, trimStart + maxClip);
-                            setTrimEnd(clamped);
-                            setTimeoutMs(Math.min(Math.round((clamped - trimStart) * 1000), TIMEOUT_LIMITS.maxVideo));
-                            if (previewVideoRef.current) previewVideoRef.current.currentTime = Math.max(clamped - 0.3, trimStart);
-                          } else {
-                            // Move both handles keeping same clip length
-                            let newStart = t - moveOffset;
-                            newStart = Math.max(0, Math.min(newStart, videoDuration - clipLen));
-                            setTrimStart(newStart);
-                            setTrimEnd(newStart + clipLen);
-                            if (previewVideoRef.current) previewVideoRef.current.currentTime = newStart;
+                          if (mode === "playhead") {
+                            setPlayheadTime(t);
+                            if (previewVideoRef.current) previewVideoRef.current.currentTime = t;
+                            return;
+                          }
+                          setSegments((prev) => {
+                            const updated = [...prev];
+                            const s = { ...updated[segIdx] };
+                            const maxTotal = TIMEOUT_LIMITS.maxVideo / 1000;
+                            const othersDur = totalSegDuration(prev) - (prev[segIdx].end - prev[segIdx].start);
+                            const maxThisSeg = maxTotal - othersDur;
+                            // Compute bounds from neighbors to prevent overlap
+                            const sorted = updated.map((sg, i) => ({ ...sg, i })).sort((a, b) => a.start - b.start);
+                            const sortedIdx = sorted.findIndex((x) => x.i === segIdx);
+                            const prevSeg = sortedIdx > 0 ? sorted[sortedIdx - 1] : null;
+                            const nextSeg = sortedIdx < sorted.length - 1 ? sorted[sortedIdx + 1] : null;
+                            const lowerBound = prevSeg ? prevSeg.end : 0;
+                            const upperBound = nextSeg ? nextSeg.start : videoDuration;
+                            if (mode === "start") {
+                              let v = Math.max(lowerBound, Math.min(t, s.end - 0.5));
+                              if (s.end - v > maxThisSeg) v = s.end - maxThisSeg;
+                              s.start = v;
+                            } else if (mode === "end") {
+                              let v = Math.min(upperBound, Math.max(t, s.start + 0.5));
+                              if (v - s.start > maxThisSeg) v = s.start + maxThisSeg;
+                              s.end = v;
+                            } else {
+                              // Find the right gap for the dragged position
+                              const desiredStart = t - moveOffset;
+                              const others = sorted.filter((x) => x.i !== segIdx);
+                              // Build list of available gaps
+                              const gaps: { start: number; end: number }[] = [];
+                              let gapStart = 0;
+                              for (const o of others) {
+                                if (o.start > gapStart) gaps.push({ start: gapStart, end: o.start });
+                                gapStart = Math.max(gapStart, o.end);
+                              }
+                              if (gapStart < videoDuration) gaps.push({ start: gapStart, end: videoDuration });
+                              // Find the gap where desiredStart falls, or the closest one that fits
+                              let bestGap = gaps.find((g) => g.end - g.start >= clipLen && desiredStart >= g.start - clipLen && desiredStart <= g.end);
+                              if (!bestGap) bestGap = gaps.filter((g) => g.end - g.start >= clipLen).sort((a, b) => Math.abs((a.start + a.end) / 2 - desiredStart) - Math.abs((b.start + b.end) / 2 - desiredStart))[0];
+                              if (bestGap) {
+                                let ns = Math.max(bestGap.start, Math.min(desiredStart, bestGap.end - clipLen));
+                                s.start = ns;
+                                s.end = ns + clipLen;
+                              }
+                            }
+                            updated[segIdx] = s;
+                            const td = totalSegDuration(updated);
+                            setTimeoutMs(Math.min(Math.round(td * 1000), TIMEOUT_LIMITS.maxVideo));
+                            return updated;
+                          });
+                          if (previewVideoRef.current) {
+                            previewVideoRef.current.currentTime = mode === "end" ? Math.max(pxToTime(ev.clientX - rect.left) - 0.3, segments[segIdx]?.start ?? 0) : pxToTime(ev.clientX - rect.left);
                           }
                         };
 
@@ -1658,65 +2322,119 @@ function MainChat() {
                         onMove(e.nativeEvent);
                       }}
                     >
-                      {/* Inactive zone left */}
+                      {/* Inactive background */}
+                      <div className="absolute inset-0 rounded-md" style={{ background: "rgba(0,0,0,0.35)" }} />
+
+                      {/* Segment zones */}
+                      {segments.map((seg, i) => (
+                        <div
+                          key={i}
+                          className="absolute top-0 bottom-0"
+                          style={{
+                            left: `${(seg.start / videoDuration) * 100}%`,
+                            width: `${((seg.end - seg.start) / videoDuration) * 100}%`,
+                            background: segColor(i),
+                            opacity: i === activeSegment ? 0.4 : 0.2,
+                            pointerEvents: "none",
+                            zIndex: 1,
+                          }}
+                        />
+                      ))}
+
+                      {/* Handles for active segment */}
+                      {(() => {
+                        const seg = segments[activeSegment];
+                        if (!seg) return null;
+                        return (
+                          <>
+                            <div
+                              className="absolute top-0 bottom-0 flex items-center justify-center"
+                              style={{
+                                left: `${(seg.start / videoDuration) * 100}%`,
+                                transform: "translateX(-50%)",
+                                width: 14,
+                                zIndex: 4,
+                                pointerEvents: "none",
+                              }}
+                            >
+                              <div style={{ width: 4, height: 18, borderRadius: 2, background: segColor(activeSegment), border: "1px solid #000" }} />
+                            </div>
+                            <div
+                              className="absolute top-0 bottom-0 flex items-center justify-center"
+                              style={{
+                                left: `${(seg.end / videoDuration) * 100}%`,
+                                transform: "translateX(-50%)",
+                                width: 14,
+                                zIndex: 4,
+                                pointerEvents: "none",
+                              }}
+                            >
+                              <div style={{ width: 4, height: 18, borderRadius: 2, background: segColor(activeSegment), border: "1px solid #000", pointerEvents: "none" }} />
+                            </div>
+                          </>
+                        );
+                      })()}
+
+                      {/* Playhead indicator */}
                       <div
-                        className="absolute top-0 bottom-0 left-0 rounded-l-md"
+                        className="absolute"
                         style={{
-                          width: `${(trimStart / videoDuration) * 100}%`,
-                          background: "rgba(0,0,0,0.35)",
+                          left: `${(playheadTime / videoDuration) * 100}%`,
+                          transform: "translateX(-50%)",
+                          top: 0,
+                          bottom: 0,
+                          width: 2,
+                          background: "#fff",
+                          opacity: 0.9,
+                          zIndex: 6,
+                          pointerEvents: "none",
                         }}
                       />
-                      {/* Active zone */}
+                    </div>
+
+                    {/* Playhead drag zone below */}
+                    <div
+                      className="relative rounded-b-lg"
+                      style={{ height: 16, cursor: "col-resize", userSelect: "none", background: "var(--bg-input)", borderLeft: "2px solid var(--border-card)", borderRight: "2px solid var(--border-card)", borderBottom: "2px solid var(--border-card)", marginTop: -2 }}
+                      onMouseDown={(e) => {
+                        const track = e.currentTarget;
+                        const rect = track.getBoundingClientRect();
+                        const pxToTime = (px: number) => Math.max(0, Math.min(videoDuration, (px / rect.width) * videoDuration));
+                        const seek = (ev: MouseEvent) => {
+                          const t = pxToTime(ev.clientX - rect.left);
+                          setPlayheadTime(t);
+                          if (previewVideoRef.current) previewVideoRef.current.currentTime = t;
+                        };
+                        seek(e.nativeEvent);
+                        const onUp = () => { window.removeEventListener("mousemove", seek); window.removeEventListener("mouseup", onUp); };
+                        window.addEventListener("mousemove", seek);
+                        window.addEventListener("mouseup", onUp);
+                      }}
+                    >
+                      {/* Playhead position line */}
                       <div
                         className="absolute top-0 bottom-0"
                         style={{
-                          left: `${(trimStart / videoDuration) * 100}%`,
-                          width: `${((trimEnd - trimStart) / videoDuration) * 100}%`,
-                          background: "var(--accent-cyan)",
-                          opacity: 0.3,
-                          cursor: "grab",
+                          left: `${(playheadTime / videoDuration) * 100}%`,
+                          transform: "translateX(-50%)",
+                          width: 2,
+                          background: "#fff",
+                          opacity: 0.7,
                         }}
                       />
-                      {/* Inactive zone right */}
+                      {/* Time label */}
                       <div
-                        className="absolute top-0 bottom-0 right-0 rounded-r-md"
-                        style={{
-                          width: `${((videoDuration - trimEnd) / videoDuration) * 100}%`,
-                          background: "rgba(0,0,0,0.35)",
-                        }}
-                      />
-                      {/* Start handle */}
-                      <div
-                        className="absolute top-0 bottom-0 flex items-center justify-center"
-                        style={{
-                          left: `${(trimStart / videoDuration) * 100}%`,
-                          transform: "translateX(-50%)",
-                          width: 14,
-                          cursor: "ew-resize",
-                          zIndex: 4,
-                        }}
+                        className="absolute inset-0 flex items-center justify-center"
+                        style={{ fontSize: 9, color: "var(--text-muted)", fontWeight: 700, pointerEvents: "none" }}
                       >
-                        <div style={{ width: 4, height: 18, borderRadius: 2, background: "var(--accent-cyan)", border: "1px solid #000" }} />
-                      </div>
-                      {/* End handle */}
-                      <div
-                        className="absolute top-0 bottom-0 flex items-center justify-center"
-                        style={{
-                          left: `${(trimEnd / videoDuration) * 100}%`,
-                          transform: "translateX(-50%)",
-                          width: 14,
-                          cursor: "ew-resize",
-                          zIndex: 4,
-                        }}
-                      >
-                        <div style={{ width: 4, height: 18, borderRadius: 2, background: "var(--accent-pink)", border: "1px solid #000" }} />
+                        {playheadTime.toFixed(1)}s / {videoDuration.toFixed(1)}s
                       </div>
                     </div>
                   </div>
                 )}
 
                 {/* Duration (images only) */}
-                {mediaData?.type !== "video" && (
+                {mediaData?.type === "image" && (
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <label className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
@@ -1773,26 +2491,26 @@ function MainChat() {
                 setSendStatus(msg);
                 setTimeout(() => setSendStatus(null), 2000);
               }}
-              onSelectMeme={(dataUrl, mimeType, isVideo) => {
-                setMediaData({ type: isVideo ? "video" : "image", data: dataUrl, mimeType });
+              onSelectMeme={(dataUrl, mimeType, mediaType) => {
+                setMediaData({ type: mediaType, data: dataUrl, mimeType });
                 setAudioData(null);
                 setTextData({ topText: "", bottomText: "" });
-                setPreviewMuted(true);
-                if (isVideo) {
-                  const v = document.createElement("video");
-                  v.src = dataUrl;
-                  v.onloadedmetadata = () => {
-                    const dur = v.duration;
+                setPreviewMuted(mediaType !== "audio");
+                if (mediaType === "video" || mediaType === "audio") {
+                  const el = document.createElement(mediaType === "video" ? "video" : "audio");
+                  el.src = dataUrl;
+                  el.onloadedmetadata = () => {
+                    const dur = el.duration;
                     setVideoDuration(dur);
-                    setTrimStart(0);
                     const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
-                    setTrimEnd(maxTrim);
+                    setSegments([{ start: 0, end: maxTrim }]);
+                    setActiveSegment(0);
                     setTimeoutMs(Math.round(maxTrim * 1000));
                   };
                 } else {
                   setVideoDuration(0);
-                  setTrimStart(0);
-                  setTrimEnd(0);
+                  setSegments([]);
+                  setActiveSegment(0);
                 }
                 setActiveTab("media");
               }}
@@ -1806,26 +2524,26 @@ function MainChat() {
                 setSendStatus(msg);
                 setTimeout(() => setSendStatus(null), 2000);
               }}
-              onSelectMeme={(dataUrl, mimeType, isVideo) => {
-                setMediaData({ type: isVideo ? "video" : "image", data: dataUrl, mimeType });
+              onSelectMeme={(dataUrl, mimeType, mediaType) => {
+                setMediaData({ type: mediaType, data: dataUrl, mimeType });
                 setAudioData(null);
                 setTextData({ topText: "", bottomText: "" });
-                setPreviewMuted(true);
-                if (isVideo) {
-                  const v = document.createElement("video");
-                  v.src = dataUrl;
-                  v.onloadedmetadata = () => {
-                    const dur = v.duration;
+                setPreviewMuted(mediaType !== "audio");
+                if (mediaType === "video" || mediaType === "audio") {
+                  const el = document.createElement(mediaType === "video" ? "video" : "audio");
+                  el.src = dataUrl;
+                  el.onloadedmetadata = () => {
+                    const dur = el.duration;
                     setVideoDuration(dur);
-                    setTrimStart(0);
                     const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
-                    setTrimEnd(maxTrim);
+                    setSegments([{ start: 0, end: maxTrim }]);
+                    setActiveSegment(0);
                     setTimeoutMs(Math.round(maxTrim * 1000));
                   };
                 } else {
                   setVideoDuration(0);
-                  setTrimStart(0);
-                  setTrimEnd(0);
+                  setSegments([]);
+                  setActiveSegment(0);
                 }
                 setActiveTab("media");
               }}
@@ -1860,7 +2578,7 @@ function MainChat() {
                 <div className="flex gap-2 mt-2">
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(`shitpost://friend/${user?.username}`);
+                      navigator.clipboard.writeText(myInviteCode);
                       setSendStatus(t("friends.link_copied"));
                       setTimeout(() => setSendStatus(null), 2000);
                     }}
@@ -2092,6 +2810,78 @@ function MainChat() {
                   </div>
                 )}
               </div>
+              <div
+                className="p-4 rounded-xl flex items-center justify-between"
+                style={{ background: "var(--bg-input)", border: `2px solid ${dndEnabled ? "var(--accent-red)" : "var(--border-card)"}` }}
+              >
+                <div>
+                  <p className="text-xs font-bold flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+                    <Icons.Moon size={14} /> {t("settings.dnd").toUpperCase()}
+                  </p>
+                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                    {t("settings.dnd_desc")}
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    const newVal = !dndEnabled;
+                    socketRef.current?.emit("status:set_dnd", newVal);
+                    setDndEnabled(newVal);
+                  }}
+                  className="relative rounded-full transition-colors"
+                  style={{
+                    width: 44, height: 24, flexShrink: 0,
+                    background: dndEnabled ? "var(--accent-red)" : "var(--bg-card)",
+                    border: "2px solid #000",
+                  }}
+                >
+                  <div
+                    className="absolute top-0.5 rounded-full transition-all"
+                    style={{
+                      width: 16, height: 16,
+                      background: "#fff",
+                      border: "2px solid #000",
+                      left: dndEnabled ? 22 : 2,
+                    }}
+                  />
+                </button>
+              </div>
+              <div
+                className="p-4 rounded-xl flex items-center justify-between"
+                style={{ background: "var(--bg-input)", border: `2px solid ${selfDefault ? "var(--accent-orange)" : "var(--border-card)"}` }}
+              >
+                <div>
+                  <p className="text-xs font-bold flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+                    <Icons.Zap size={14} /> {t("settings.self_default").toUpperCase()}
+                  </p>
+                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                    {t("settings.self_default_desc")}
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    const newVal = !selfDefault;
+                    setSelfDefault(newVal);
+                    localStorage.setItem("selfDefault", String(newVal));
+                  }}
+                  className="relative rounded-full transition-colors"
+                  style={{
+                    width: 44, height: 24, flexShrink: 0,
+                    background: selfDefault ? "var(--accent-orange)" : "var(--bg-card)",
+                    border: "2px solid #000",
+                  }}
+                >
+                  <div
+                    className="absolute top-0.5 rounded-full transition-all"
+                    style={{
+                      width: 16, height: 16,
+                      background: "#fff",
+                      border: "2px solid #000",
+                      left: selfDefault ? 22 : 2,
+                    }}
+                  />
+                </button>
+              </div>
               <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs font-bold flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
@@ -2230,9 +3020,27 @@ function MainChat() {
             <h2 className="font-cartoon text-base mb-1 flex items-center gap-2 flex-shrink-0" style={{ color: "var(--accent-cyan)" }}>
               <Icons.Users size={18} /> {t("sidebar.friends")}
             </h2>
-            <p className="text-xs mb-3 flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-              {onlineCount} {t("friends.online").toLowerCase()}
-            </p>
+            <div className="flex items-center justify-between mb-3 flex-shrink-0">
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                {onlineCount} {t("friends.online").toLowerCase()}
+              </p>
+              {user && (
+                <button
+                  onClick={() => { if (!selfDefault) handleTargetToggle(user.id); }}
+                  className="text-xs font-bold px-2 py-0.5 rounded-lg transition-colors"
+                  style={{
+                    background: (selfDefault || selectedTargets.includes(user.id)) ? "var(--accent-orange)" : "var(--bg-input)",
+                    color: (selfDefault || selectedTargets.includes(user.id)) ? "#000" : "var(--text-muted)",
+                    border: "2px solid var(--border-card)",
+                    fontSize: 10,
+                    opacity: selfDefault ? 0.7 : 1,
+                    cursor: selfDefault ? "default" : "pointer",
+                  }}
+                >
+                  {t("friends.self")}
+                </button>
+              )}
+            </div>
 
             <div className="flex-1 overflow-y-auto space-y-4 pr-1 min-h-0">
               {/* Groups */}
@@ -2290,6 +3098,7 @@ function MainChat() {
                 <div className="space-y-1">
                   {friends.map((friend) => {
                     const isOnline = onlineFriendIds.includes(friend.id);
+                    const isDnd = dndFriendIds.includes(friend.id);
                     const isSelected = selectedTargets.includes(friend.id);
                     return (
                       <div
@@ -2315,17 +3124,17 @@ function MainChat() {
                             {friend.username[0].toUpperCase()}
                           </div>
                           <div
-                            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 ${isOnline ? "online-pulse" : ""}`}
+                            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 ${isOnline && !isDnd ? "online-pulse" : ""}`}
                             style={{
-                              background: isOnline ? "var(--accent-green)" : "var(--text-muted)",
+                              background: isDnd ? "var(--accent-red)" : isOnline ? "var(--accent-green)" : "var(--text-muted)",
                               borderColor: "var(--bg-card)",
                             }}
                           />
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-xs font-bold truncate">{friend.username}</p>
-                          <p className="text-xs" style={{ color: isOnline ? "var(--accent-green)" : "var(--text-muted)", fontSize: 10 }}>
-                            {isOnline ? t("friends.online") : t("friends.offline")}
+                          <p className="text-xs" style={{ color: isDnd ? "var(--accent-red)" : isOnline ? "var(--accent-green)" : "var(--text-muted)", fontSize: 10 }}>
+                            {isDnd ? t("friends.dnd") : isOnline ? t("friends.online") : t("friends.offline")}
                           </p>
                         </div>
                         <div

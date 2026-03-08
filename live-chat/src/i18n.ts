@@ -60,6 +60,8 @@ const translations = {
     "friends.all_in_group": "Tous tes amis sont deja dans ce groupe",
     "friends.online": "En ligne",
     "friends.offline": "Hors ligne",
+    "friends.dnd": "Ne pas deranger",
+    "friends.self": "Moi-meme",
     "friends.username_placeholder": "Pseudo de l'ami",
     "friends.copy_link": "Copier mon lien d'ajout",
     "friends.link_copied": "Lien copie !",
@@ -89,6 +91,8 @@ const translations = {
     "media.trim": "Decouper",
     "media.no_target": "Selectionne un destinataire",
     "media.no_media": "Ajoute une image ou video",
+    "media.file_too_large": "Fichier trop gros (max {max} Mo)",
+    "media.too_many_files": "Trop de fichiers (max {max})",
 
     // Settings
     "settings.title": "Reglages",
@@ -107,6 +111,12 @@ const translations = {
     "settings.server_url_placeholder": "https://shitpost.example.com",
     "settings.server_connect": "Connecter",
     "settings.overlay_screen": "Ecran de l'overlay",
+    "settings.dnd": "Ne pas deranger",
+    "settings.dnd_disable": "Desactiver ne pas deranger",
+    "settings.dnd_desc": "Bloquer la reception de shitposts",
+    "settings.self_default": "M'envoyer aussi",
+    "settings.self_default_desc": "Recevoir mes propres shitposts",
+    "settings.logout_confirm": "Vraiment se deconnecter ?",
 
     // Memes
     "memes.title": "Mes Shitposts",
@@ -219,6 +229,8 @@ const translations = {
     "friends.all_in_group": "All your friends are already in this group",
     "friends.online": "Online",
     "friends.offline": "Offline",
+    "friends.dnd": "Do not disturb",
+    "friends.self": "Myself",
     "friends.username_placeholder": "Friend's username",
     "friends.copy_link": "Copy my invite link",
     "friends.link_copied": "Link copied!",
@@ -248,6 +260,8 @@ const translations = {
     "media.trim": "Trim",
     "media.no_target": "Select a recipient",
     "media.no_media": "Add an image or video",
+    "media.file_too_large": "File too large (max {max} MB)",
+    "media.too_many_files": "Too many files (max {max})",
 
     // Settings
     "settings.title": "Settings",
@@ -266,6 +280,12 @@ const translations = {
     "settings.server_url_placeholder": "https://shitpost.example.com",
     "settings.server_connect": "Connect",
     "settings.overlay_screen": "Overlay screen",
+    "settings.dnd": "Do not disturb",
+    "settings.dnd_disable": "Disable do not disturb",
+    "settings.dnd_desc": "Block incoming shitposts",
+    "settings.self_default": "Send to myself too",
+    "settings.self_default_desc": "Receive my own shitposts",
+    "settings.logout_confirm": "Really log out?",
 
     // Memes
     "memes.title": "My Shitposts",

@@ -3,7 +3,7 @@ export interface HistoryEntry {
   timestamp: number;
   senderName: string;
   direction: "sent" | "received";
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "audio";
   mimeType: string;
   mediaBase64: string;
   textOverlay?: {
