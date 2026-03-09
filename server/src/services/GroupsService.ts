@@ -39,6 +39,12 @@ export class GroupsService {
 
     if (!userToAdd) throw new Error("User not found");
 
+    // Check if either user has blocked the other
+    const { FriendsService } = await import("./FriendsService");
+    if (await FriendsService.isBlocked(requesterId, userToAdd.id)) {
+      throw new Error("Cannot invite this user");
+    }
+
     if (group.members.some((m: any) => m.userId === userToAdd.id)) {
       throw new Error("User is already a member");
     }

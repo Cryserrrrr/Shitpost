@@ -14,6 +14,11 @@ export class FriendsService {
       throw new Error("You cannot add yourself as a friend");
     }
 
+    // Check if either user has blocked the other
+    if (await this.isBlocked(requesterId, addressee.id)) {
+      throw new Error("Cannot send friend request");
+    }
+
     // Check if request already exists
     const existingFriendship = await prisma.friendship.findFirst({
       where: {
@@ -51,6 +56,11 @@ export class FriendsService {
 
     if (userId === friend.id) {
       throw new Error("You cannot add yourself as a friend");
+    }
+
+    // Check if either user has blocked the other
+    if (await this.isBlocked(userId, friend.id)) {
+      throw new Error("Cannot send friend request");
     }
 
     const existing = await prisma.friendship.findFirst({
@@ -162,5 +172,78 @@ export class FriendsService {
         },
       },
     });
+  }
+
+  static async blockUser(blockerId: string, blockedId: string) {
+    if (blockerId === blockedId) {
+      throw new Error("You cannot block yourself");
+    }
+
+    // Check if a friendship exists (any direction)
+    const existing = await prisma.friendship.findFirst({
+      where: {
+        OR: [
+          { requesterId: blockerId, addresseeId: blockedId },
+          { requesterId: blockedId, addresseeId: blockerId },
+        ],
+      },
+    });
+
+    if (existing) {
+      // Update existing record to blocked
+      return prisma.friendship.update({
+        where: { id: existing.id },
+        data: { requesterId: blockerId, addresseeId: blockedId, status: "blocked" },
+      });
+    }
+
+    // Create a new blocked record
+    return prisma.friendship.create({
+      data: {
+        requesterId: blockerId,
+        addresseeId: blockedId,
+        status: "blocked",
+      },
+    });
+  }
+
+  static async unblockUser(blockerId: string, blockedId: string) {
+    const record = await prisma.friendship.findFirst({
+      where: {
+        requesterId: blockerId,
+        addresseeId: blockedId,
+        status: "blocked",
+      },
+    });
+
+    if (!record) {
+      throw new Error("User is not blocked");
+    }
+
+    return prisma.friendship.delete({ where: { id: record.id } });
+  }
+
+  static async getBlockedUserIds(userId: string): Promise<string[]> {
+    const blocked = await prisma.friendship.findMany({
+      where: {
+        requesterId: userId,
+        status: "blocked",
+      },
+      select: { addresseeId: true },
+    });
+    return blocked.map((b) => b.addresseeId);
+  }
+
+  static async isBlocked(userId1: string, userId2: string): Promise<boolean> {
+    const record = await prisma.friendship.findFirst({
+      where: {
+        status: "blocked",
+        OR: [
+          { requesterId: userId1, addresseeId: userId2 },
+          { requesterId: userId2, addresseeId: userId1 },
+        ],
+      },
+    });
+    return !!record;
   }
 }

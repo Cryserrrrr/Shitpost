@@ -6,16 +6,22 @@ Built with **Tauri v2** + **React** + **Node.js** + **Socket.io** + **PostgreSQL
 
 ## Features
 
-- Send images and videos with text overlays to friends' screens
-- Video compression and trimming built-in
-- Audio attachments on images
-- Real-time presence (online/offline)
-- Friend system with requests
-- Groups with roles (owner, admin, member)
+- Send images, videos and audio with text overlays to friends' screens
+- Video compression, trimming and multi-segment looping
+- Audio overlay attachments on images with volume/trim controls
+- Real-time presence (online/offline/DND)
+- Friend system with requests and invite codes (`#CODE`)
+- User blocking (blocks friend requests, group invites and media)
+- Groups with roles (owner, admin, member) and invite codes
 - Overlay window always on top (transparent, click-through)
+- Send/receive history with download support
+- Local memes library with auto-save
 - System tray with auto-start option
+- Multi-monitor overlay support
 - i18n support (French / English)
 - Refresh token auth (stay logged in for 30 days)
+- Auto-updater (NSIS installer with signature verification)
+- Account deletion (RGPD compliant)
 
 ## Architecture
 
@@ -27,6 +33,7 @@ shitpost/
   server/             # Node.js + Express + Socket.io + Prisma
     prisma/           # Database schema & migrations
     src/              # Server source code
+  docker/             # Docker Compose (PostgreSQL + Redis)
 ```
 
 ## Prerequisites
@@ -34,22 +41,19 @@ shitpost/
 - **Node.js** >= 18
 - **Rust** (for Tauri) - [install](https://rustup.rs)
 - **PostgreSQL** (or Docker)
+- **Redis** (optional, falls back to in-memory)
 - **pnpm** or **npm**
 
 ## Setup
 
-### 1. Database
+### 1. Database & Redis (Docker)
 
 ```bash
-# With Docker
-docker run -d --name shitpost-db \
-  -e POSTGRES_PASSWORD=your_password \
-  -e POSTGRES_DB=shitpost_db \
-  -p 5432:5432 \
-  postgres:16
-
-# Or use an existing PostgreSQL instance
+cd docker
+docker compose up -d
 ```
+
+This starts PostgreSQL 16 and Redis 7. Or use existing instances.
 
 ### 2. Server
 
@@ -92,6 +96,8 @@ npm run tauri build
 | `PORT` | Server port | `3000` |
 | `NODE_ENV` | `development` or `production` | `development` |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins | `http://localhost:1420,...` |
+| `REDIS_URL` | Redis connection string (optional) | - |
+| `FORCE_HTTPS` | Force HTTPS redirect in production | `false` |
 
 ### Client
 
@@ -101,13 +107,27 @@ No environment variables needed. The server URL is configured at runtime via the
 
 See [DEPLOY.md](./DEPLOY.md) for detailed instructions.
 
+## Security
+
+- HTTPS redirect (configurable via `FORCE_HTTPS`)
+- Security headers (X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, Referrer-Policy)
+- Rate limiting on all API routes (Redis-backed or in-memory)
+- Input validation and sanitization on all endpoints
+- Bcrypt password hashing (10 rounds)
+- Case-insensitive unique usernames
+- Server-side media size limits (100MB media, 10MB audio, 50 targets max)
+- JWT access tokens (1h) + refresh token rotation (30 days)
+- Account deletion with password confirmation
+- User blocking system
+
 ## Tech Stack
 
 - **Frontend**: React 18, TypeScript, Tailwind CSS, Socket.io-client, Axios
 - **Desktop**: Tauri v2 (Rust)
 - **Backend**: Node.js, Express, Socket.io, Prisma ORM
 - **Database**: PostgreSQL
-- **Auth**: JWT access tokens (1h) + refresh tokens (30 days)
+- **Cache**: Redis (optional, in-memory fallback)
+- **Auth**: JWT access tokens (1h) + refresh tokens (30 days) + bcrypt
 
 ## License
 

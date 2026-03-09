@@ -114,7 +114,14 @@ function MainChat() {
   const [groupInvites, setGroupInvites] = useState<any[]>([]);
   const [serverModal, setServerModal] = useState(false);
   const [serverUrlInput, setServerUrlInput] = useState("");
-  const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    message: string;
+    onConfirm: (password?: string) => void;
+    passwordRequired?: boolean;
+    error?: string;
+    loading?: boolean;
+  } | null>(null);
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [dndEnabled, setDndEnabled] = useState(false);
   const [selfDefault, setSelfDefault] = useState(() => localStorage.getItem("selfDefault") === "true");
   const [dndFriendIds, setDndFriendIds] = useState<string[]>([]);
@@ -122,6 +129,8 @@ function MainChat() {
   const [inviteLinkInput, setInviteLinkInput] = useState("");
   const [inviteLinkModal, setInviteLinkModal] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; friendId: string; friendName: string } | null>(null);
+  const [blockedModal, setBlockedModal] = useState(false);
+  const [blockedUsers, setBlockedUsers] = useState<{ id: string; username: string }[]>([]);
 
   // Initialize DND from user status
   useEffect(() => {
@@ -229,11 +238,26 @@ function MainChat() {
       });
     });
 
-    newSocket.on("friends:request_accepted", (data: { friend: any }) => {
+    newSocket.on("friends:request_accepted", (data: { friend: any; online?: boolean; dnd?: boolean }) => {
       setFriends((prev) => {
         if (prev.some((f: any) => f.id === data.friend.id)) return prev;
         return [...prev, data.friend];
       });
+      // Also remove from pending if we were the accepter
+      setPendingRequests((prev) => prev.filter((r: any) => r.requesterId !== data.friend.id));
+      // Update online status
+      if (data.online) {
+        setOnlineFriendIds((prev) => prev.includes(data.friend.id) ? prev : [...prev, data.friend.id]);
+      }
+      if (data.dnd) {
+        setDndFriendIds((prev) => prev.includes(data.friend.id) ? prev : [...prev, data.friend.id]);
+      }
+    });
+
+    newSocket.on("friends:removed", (data: { userId: string }) => {
+      setFriends((prev) => prev.filter((f: any) => f.id !== data.userId));
+      setSelectedTargets((prev) => prev.filter((id) => id !== data.userId));
+      setOnlineFriendIds((prev) => prev.filter((id) => id !== data.userId));
     });
 
     // Real-time group invite updates
@@ -580,12 +604,14 @@ function MainChat() {
                 validPaths.push(p);
               }
             } catch {
-              skippedLarge++;
+              // stat failed (permissions, path issue) — still allow the file
+              validPaths.push(p);
             }
           }
           if (skippedLarge > 0) {
+            const maxMb = isVideo(paths[0]) ? MAX_FILE_SIZE.video : MAX_FILE_SIZE.image;
             setSendStatus(
-              t("media.file_too_large").replace("{max}", "500"),
+              t("media.file_too_large").replace("{max}", String(Math.round(maxMb / 1024 / 1024))),
             );
             setTimeout(() => setSendStatus(null), 3000);
           }
@@ -991,9 +1017,16 @@ function MainChat() {
   };
 
   const handleSendFriendRequest = async () => {
-    if (!searchQuery.trim()) return;
+    const input = searchQuery.trim();
+    if (!input) return;
+    // If it looks like an invite code (#XXXXXXXX) or deep link, handle it as such
+    if (input.startsWith("#") || input.startsWith("shitpost://")) {
+      handleInviteLink(input);
+      setSearchQuery("");
+      return;
+    }
     try {
-      await api.post("/friends/request", { username: searchQuery });
+      await api.post("/friends/request", { username: input });
       setSearchQuery("");
       fetchData();
       setSendStatus(t("friends.request_sent"));
@@ -1005,7 +1038,11 @@ function MainChat() {
   };
 
   const handleAcceptFriend = async (id: string) => {
-    try { await api.post(`/friends/accept/${id}`); fetchData(); } catch {}
+    try {
+      await api.post(`/friends/accept/${id}`);
+      // Remove from pending (friend is added via socket event friends:request_accepted)
+      setPendingRequests((prev) => prev.filter((r: any) => r.id !== id));
+    } catch {}
   };
 
   const handleDeclineFriend = async (id: string) => {
@@ -1059,14 +1096,37 @@ function MainChat() {
     }
   };
 
+  const tryResolveGroup = useCallback((code: string) => {
+    api.get(`/groups/resolve/${code}`).then((res) => {
+      const { groupName, memberCount } = res.data;
+      setConfirmAction({
+        message: `${t("groups.invites")}\n${groupName} (${memberCount} ${t("groups.members").toLowerCase()})`,
+        onConfirm: async () => {
+          try {
+            await api.post(`/groups/join/${code}`);
+            fetchData();
+            setSendStatus(t("friends.accept"));
+            setTimeout(() => setSendStatus(null), 2000);
+          } catch (err: any) {
+            setSendStatus(err.response?.data?.message || t("general.error"));
+            setTimeout(() => setSendStatus(null), 3000);
+          }
+          setConfirmAction(null);
+        },
+      });
+    }).catch(() => {
+      setSendStatus(t("general.error"));
+      setTimeout(() => setSendStatus(null), 2000);
+    });
+  }, [fetchData, t]);
+
   const handleInviteLink = useCallback((link: string) => {
     const trimmed = link.trim();
 
-    // Friend link: shitpost://friend/CODE or raw CODE (hex 8 chars)
-    const friendMatch = trimmed.match(/^shitpost:\/\/friend\/(.+)$/) || trimmed.match(/^([A-Fa-f0-9]{8})$/);
-    if (friendMatch) {
-      const code = friendMatch[1].toUpperCase();
-      // Resolve invite code to username before showing confirm
+    // Explicit deep links
+    const friendDeepLink = trimmed.match(/^shitpost:\/\/friend\/(.+)$/);
+    if (friendDeepLink) {
+      const code = friendDeepLink[1].toUpperCase();
       api.get(`/friends/resolve/${code}`).then((res) => {
         const { username } = res.data;
         if (username === user?.username) return;
@@ -1092,20 +1152,26 @@ function MainChat() {
       return;
     }
 
-    // Group link: shitpost://group/INVITE_CODE
-    const groupMatch = trimmed.match(/^shitpost:\/\/group\/(.+)$/);
-    if (groupMatch) {
-      const code = groupMatch[1];
-      // Resolve group info first
-      api.get(`/groups/resolve/${code}`).then((res) => {
-        const { groupName, memberCount } = res.data;
+    const groupDeepLink = trimmed.match(/^shitpost:\/\/group\/(.+)$/);
+    if (groupDeepLink) {
+      tryResolveGroup(groupDeepLink[1]);
+      return;
+    }
+
+    // #CODE — try friend first, fallback to group
+    const hashMatch = trimmed.match(/^#(.+)$/);
+    if (hashMatch) {
+      const code = hashMatch[1].toUpperCase();
+      api.get(`/friends/resolve/${code}`).then((res) => {
+        const { username } = res.data;
+        if (username === user?.username) return;
         setConfirmAction({
-          message: `${t("groups.invites")}\n${groupName} (${memberCount} ${t("groups.members").toLowerCase()})`,
+          message: `${t("friends.confirm_add")}\n${username}`,
           onConfirm: async () => {
             try {
-              await api.post(`/groups/join/${code}`);
+              await api.post("/friends/add-direct", { code });
               fetchData();
-              setSendStatus(t("friends.accept"));
+              setSendStatus(t("friends.request_sent"));
               setTimeout(() => setSendStatus(null), 2000);
             } catch (err: any) {
               setSendStatus(err.response?.data?.message || t("general.error"));
@@ -1115,12 +1181,12 @@ function MainChat() {
           },
         });
       }).catch(() => {
-        setSendStatus(t("general.error"));
-        setTimeout(() => setSendStatus(null), 2000);
+        // Friend resolve failed — try as group code
+        tryResolveGroup(code);
       });
       return;
     }
-  }, [user, fetchData, t]);
+  }, [user, fetchData, t, tryResolveGroup]);
 
   // Deep link handler
   useEffect(() => {
@@ -1175,8 +1241,21 @@ function MainChat() {
   const handleRemoveFriend = async (friendId: string) => {
     try {
       await api.delete(`/friends/${friendId}`);
+      setFriends((prev) => prev.filter((f: any) => f.id !== friendId));
       setSelectedTargets((prev) => prev.filter((id) => id !== friendId));
-      fetchData();
+      setOnlineFriendIds((prev) => prev.filter((id) => id !== friendId));
+    } catch (err: any) {
+      setSendStatus(err.response?.data?.message || t("general.error"));
+      setTimeout(() => setSendStatus(null), 3000);
+    }
+  };
+
+  const handleBlockUser = async (userId: string) => {
+    try {
+      await api.post(`/friends/block/${userId}`);
+      setFriends((prev) => prev.filter((f: any) => f.id !== userId));
+      setSelectedTargets((prev) => prev.filter((id) => id !== userId));
+      setOnlineFriendIds((prev) => prev.filter((id) => id !== userId));
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
       setTimeout(() => setSendStatus(null), 3000);
@@ -1209,7 +1288,6 @@ function MainChat() {
     return group.members?.find((m: any) => m.userId === user?.id)?.role || "member";
   };
 
-  const onlineCount = friends.filter((f) => onlineFriendIds.includes(f.id)).length;
 
   return (
     <div
@@ -1288,7 +1366,7 @@ function MainChat() {
           { id: "media", label: "Shitpost", icon: Icons.Media, color: "var(--accent-pink)" },
           { id: "memes", label: t("memes.title"), icon: Icons.Gallery, color: "var(--accent-orange)" },
           { id: "history", label: t("history.title"), icon: Icons.Clock, color: "var(--accent-purple)" },
-          { id: "social", label: t("sidebar.friends"), icon: Icons.Users, color: "var(--accent-cyan)" },
+          { id: "social", label: t("sidebar.social"), icon: Icons.Users, color: "var(--accent-cyan)" },
           { id: "settings", label: t("sidebar.settings"), icon: Icons.Settings, color: "var(--accent-yellow)" },
         ].map((tab) => (
           <button
@@ -1351,7 +1429,7 @@ function MainChat() {
                   onChange={(e) => setModalInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleModalSubmit()}
                   className="cartoon-input w-full mb-4"
-                  placeholder="Ex: The boys"
+                  placeholder={t("groups.name_placeholder")}
                   autoFocus
                 />
                 <div className="flex gap-3">
@@ -1462,17 +1540,17 @@ function MainChat() {
                     </div>
                   )}
 
-                  {/* Copy group invite link */}
+                  {/* Copy group invite code */}
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(`shitpost://group/${group.inviteCode}`);
-                      setSendStatus(t("groups.link_copied"));
+                      navigator.clipboard.writeText(`#${group.inviteCode}`);
+                      setSendStatus(t("groups.code_copied"));
                       setTimeout(() => setSendStatus(null), 2000);
                     }}
                     className="cartoon-btn w-full py-1.5 text-xs mb-3"
                     style={{ background: "var(--bg-input)", fontSize: 11 }}
                   >
-                    <Icons.Link size={12} className="inline mr-1" /> {t("groups.copy_link")}
+                    <Icons.Link size={12} className="inline mr-1" /> {t("groups.copy_code")}
                   </button>
 
                   {/* Members list */}
@@ -1609,7 +1687,7 @@ function MainChat() {
                 setUserContextMenu(null);
                 setConfirmAction({
                   message: t("settings.logout_confirm"),
-                  onConfirm: () => { logout(); navigate("/login"); setConfirmAction(null); },
+                  onConfirm: () => { logout(); navigate("/login"); setConfirmAction(null); setConfirmPassword(""); },
                 });
               }}
               className="w-full text-left px-4 py-2 text-xs hover:opacity-80 flex items-center gap-2"
@@ -1642,14 +1720,30 @@ function MainChat() {
               onClick={() => {
                 setConfirmAction({
                   message: `${t("friends.remove")} ${contextMenu.friendName} ?`,
-                  onConfirm: () => { handleRemoveFriend(contextMenu.friendId); setConfirmAction(null); },
+                  onConfirm: () => { handleRemoveFriend(contextMenu.friendId); setConfirmAction(null); setConfirmPassword(""); },
+                });
+                setContextMenu(null);
+              }}
+              className="w-full text-left px-4 py-2 text-xs hover:opacity-80 flex items-center gap-2"
+              style={{ color: "var(--text-gray)" }}
+            >
+              <Icons.Trash size={12} /> {t("friends.remove")}
+            </button>
+            <div style={{ height: 1, background: "var(--border-card)", margin: "2px 8px" }} />
+            <button
+              onClick={() => {
+                const fId = contextMenu.friendId;
+                const fName = contextMenu.friendName;
+                setConfirmAction({
+                  message: `${t("friends.block")} ${fName} ?\n${t("friends.block_confirm")}`,
+                  onConfirm: () => { handleBlockUser(fId); setConfirmAction(null); setConfirmPassword(""); },
                 });
                 setContextMenu(null);
               }}
               className="w-full text-left px-4 py-2 text-xs hover:opacity-80 flex items-center gap-2"
               style={{ color: "var(--accent-red)" }}
             >
-              <Icons.Trash size={12} /> {t("friends.remove")}
+              <Icons.Ban size={12} /> {t("friends.block")}
             </button>
           </div>
         </div>
@@ -1660,7 +1754,7 @@ function MainChat() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }} onClick={() => setInviteLinkModal(false)}>
           <div className="cartoon-card p-6 w-full" style={{ maxWidth: 400 }} onClick={(e) => e.stopPropagation()}>
             <h3 className="font-cartoon text-base mb-4 text-center" style={{ color: "var(--accent-cyan)" }}>
-              {t("friends.paste_link")}
+              {t("groups.paste_code")}
             </h3>
             <input
               value={inviteLinkInput}
@@ -1672,7 +1766,7 @@ function MainChat() {
                   setInviteLinkModal(false);
                 }
               }}
-              placeholder="A1B2C3D4 or shitpost://group/..."
+              placeholder={t("groups.invite_code_placeholder")}
               className="cartoon-input w-full mb-4 text-sm"
               autoFocus
             />
@@ -1702,21 +1796,98 @@ function MainChat() {
         </div>
       )}
 
+      {/* Blocked users modal */}
+      {blockedModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
+          onClick={() => setBlockedModal(false)}
+        >
+          <div
+            className="cartoon-card p-6 w-full animate-bounce-in"
+            style={{ maxWidth: 400, maxHeight: "70vh", display: "flex", flexDirection: "column" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="font-cartoon text-lg mb-4" style={{ color: "var(--accent-red)" }}>
+              <Icons.Ban size={18} style={{ display: "inline", marginRight: 8 }} />
+              {t("settings.blocked_users")}
+            </h2>
+            {blockedUsers.length === 0 ? (
+              <p className="text-sm text-center py-4" style={{ color: "var(--text-muted)" }}>
+                {t("settings.no_blocked_users")}
+              </p>
+            ) : (
+              <div className="space-y-1 overflow-y-auto" style={{ maxHeight: "50vh" }}>
+                {blockedUsers.map((u) => (
+                  <div key={u.id} className="flex items-center gap-3 p-2 rounded-lg" style={{ background: "var(--bg-input)" }}>
+                    <div
+                      className="cartoon-avatar"
+                      style={{ background: getAvatarColor(u.username), width: 32, height: 32, fontSize: 12 }}
+                    >
+                      {u.username[0].toUpperCase()}
+                    </div>
+                    <span className="flex-1 text-sm font-bold">{u.username}</span>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await api.post(`/friends/unblock/${u.id}`);
+                          setBlockedUsers((prev) => prev.filter((b) => b.id !== u.id));
+                        } catch {}
+                      }}
+                      className="cartoon-btn px-3 py-1 text-xs font-bold"
+                      style={{ background: "var(--accent-cyan)", color: "#000" }}
+                    >
+                      {t("friends.unblock")}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={() => setBlockedModal(false)}
+              className="cartoon-btn w-full py-2.5 mt-4 text-sm"
+              style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}
+            >
+              {t("general.close")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Confirm modal */}
       {confirmAction && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
-          <div className="cartoon-card p-6 w-full" style={{ maxWidth: 360 }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
+          <div className="cartoon-card p-6 w-full animate-bounce-in" style={{ maxWidth: 360 }}>
             <p className="font-bold text-center mb-4">{confirmAction.message}</p>
+            {confirmAction.passwordRequired && (
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmPassword && confirmAction.onConfirm(confirmPassword)}
+                className="cartoon-input w-full mb-2"
+                placeholder={t("settings.delete_account_password")}
+                autoFocus
+              />
+            )}
+            {confirmAction.error && (
+              <p className="text-xs text-center mb-2" style={{ color: "var(--accent-red)" }}>{confirmAction.error}</p>
+            )}
             <div className="flex gap-2">
               <button
-                onClick={confirmAction.onConfirm}
+                onClick={() => confirmAction.onConfirm(confirmPassword)}
+                disabled={confirmAction.loading || (confirmAction.passwordRequired && !confirmPassword)}
                 className="cartoon-btn flex-1 py-2.5 text-sm"
-                style={{ background: "var(--accent-red)", color: "#fff" }}
+                style={{
+                  background: "var(--accent-red)", color: "#fff",
+                  opacity: (confirmAction.loading || (confirmAction.passwordRequired && !confirmPassword)) ? 0.5 : 1,
+                }}
               >
-                {t("general.confirm")}
+                {confirmAction.loading ? "..." : t("general.confirm")}
               </button>
               <button
-                onClick={() => setConfirmAction(null)}
+                onClick={() => { setConfirmAction(null); setConfirmPassword(""); }}
+                disabled={confirmAction.loading}
                 className="cartoon-btn flex-1 py-2.5 text-sm"
                 style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}
               >
@@ -2008,7 +2179,7 @@ function MainChat() {
                     value={textData.topText}
                     onChange={(e) => setTextData((p) => ({ ...p, topText: e.target.value }))}
                     className="cartoon-input w-full text-xs py-1.5"
-                    placeholder="IMPACT TEXT..."
+                    placeholder={t("media.top_text_placeholder")}
                     rows={2}
                     style={{ resize: "none" }}
                   />
@@ -2019,7 +2190,7 @@ function MainChat() {
                     value={textData.bottomText}
                     onChange={(e) => setTextData((p) => ({ ...p, bottomText: e.target.value }))}
                     className="cartoon-input w-full text-xs py-1.5"
-                    placeholder="BOTTOM TEXT..."
+                    placeholder={t("media.bottom_text_placeholder")}
                     rows={2}
                     style={{ resize: "none" }}
                   />
@@ -2718,7 +2889,7 @@ function MainChat() {
               {/* Add friend */}
               <div className="cartoon-card p-4 flex-shrink-0">
                 <h2 className="font-cartoon text-base mb-3 flex items-center gap-2" style={{ color: "var(--accent-cyan)" }}>
-                  <Icons.Users size={18} /> {t("friends.add")}
+                  <Icons.UserPlus size={18} /> {t("friends.add")}
                 </h2>
                 <div className="flex gap-2">
                   <input
@@ -2737,25 +2908,18 @@ function MainChat() {
                     {t("friends.send")}
                   </button>
                 </div>
-                {/* Copy & paste invite links */}
-                <div className="flex gap-2 mt-2">
+                {/* Copy invite code */}
+                <div className="mt-2">
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(myInviteCode);
-                      setSendStatus(t("friends.link_copied"));
+                      navigator.clipboard.writeText(`#${myInviteCode}`);
+                      setSendStatus(t("friends.code_copied"));
                       setTimeout(() => setSendStatus(null), 2000);
                     }}
-                    className="cartoon-btn flex-1 py-1.5 text-xs"
+                    className="cartoon-btn w-full py-1.5 text-xs"
                     style={{ background: "var(--bg-input)", fontSize: 11 }}
                   >
-                    <Icons.Link size={12} className="inline mr-1" /> {t("friends.copy_link")}
-                  </button>
-                  <button
-                    onClick={() => { setInviteLinkInput(""); setInviteLinkModal(true); }}
-                    className="cartoon-btn flex-1 py-1.5 text-xs"
-                    style={{ background: "var(--bg-input)", fontSize: 11 }}
-                  >
-                    <Icons.Download size={12} className="inline mr-1" /> {t("friends.paste_link")}
+                    <Icons.Link size={12} className="inline mr-1" /> {t("friends.copy_code")}
                   </button>
                 </div>
               </div>
@@ -2840,35 +3004,42 @@ function MainChat() {
                 <div className="cartoon-card p-4">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="font-cartoon text-base flex items-center gap-2" style={{ color: "var(--accent-purple)" }}>
-                      <Icons.Broadcast size={18} /> {t("sidebar.groups")}
+                      <Icons.Users size={18} /> {t("sidebar.groups")}
                     </h2>
-                    <button
-                      onClick={handleCreateGroup}
-                      className="cartoon-btn px-4 py-1 text-xs"
-                      style={{ background: "var(--accent-purple)", color: "#fff" }}
-                    >
-                      + {t("groups.create")}
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setInviteLinkInput(""); setInviteLinkModal(true); }}
+                        className="cartoon-btn px-3 py-1 text-xs"
+                        style={{ background: "var(--bg-input)", fontSize: 11 }}
+                      >
+                        <Icons.Link size={12} className="inline mr-1" /> {t("groups.paste_code")}
+                      </button>
+                      <button
+                        onClick={handleCreateGroup}
+                        className="cartoon-btn px-4 py-1 text-xs"
+                        style={{ background: "var(--accent-purple)", color: "#fff" }}
+                      >
+                        + {t("groups.create")}
+                      </button>
+                    </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {groups.map((g) => {
                       const myRole = getMyRole(g);
                       return (
-                        <div key={g.id} className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
-                          <div className="flex justify-between items-start mb-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold">{g.name}</span>
-                              <span className="text-xs px-1.5 py-0.5 rounded font-bold" style={{
-                                background: myRole === "owner" ? "var(--accent-yellow)" : myRole === "admin" ? "var(--accent-cyan)" : "var(--bg-card)",
-                                color: myRole === "owner" || myRole === "admin" ? "#000" : "var(--text-gray)",
-                                fontSize: 10,
-                              }}>
-                                {myRole === "owner" ? t("groups.owner") : myRole === "admin" ? t("groups.admin") : t("groups.member")}
-                              </span>
+                        <div key={g.id} className="p-4 rounded-xl relative" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
+                          <span className="absolute top-3 right-3 text-xs px-1.5 py-0.5 rounded font-bold" style={{
+                            background: myRole === "owner" ? "var(--accent-yellow)" : myRole === "admin" ? "var(--accent-cyan)" : "var(--bg-card)",
+                            color: myRole === "owner" || myRole === "admin" ? "#000" : "var(--text-gray)",
+                            fontSize: 10,
+                          }}>
+                            {myRole === "owner" ? t("groups.owner") : myRole === "admin" ? t("groups.admin") : t("groups.member")}
+                          </span>
+                          <div className="mb-2">
+                            <span className="font-bold">{g.name}</span>
+                            <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                              {g.members?.length || 0} {t("groups.members")}
                             </div>
-                            <span className="text-xs px-2 py-0.5 rounded" style={{ background: "var(--bg-card)", color: "var(--text-gray)" }}>
-                              {g.members?.length || 0}
-                            </span>
                           </div>
                           <div className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
                             {g.members?.map((m: any) => {
@@ -2908,16 +3079,12 @@ function MainChat() {
 
           {activeTab === "settings" && (
             <div className="cartoon-card p-5 flex-1 overflow-y-auto space-y-4">
-              <h2 className="font-cartoon text-xl" style={{ color: "var(--accent-yellow)" }}>
-                {t("settings.title")}
+              <h2 className="font-cartoon text-xl flex items-center gap-2" style={{ color: "var(--accent-yellow)" }}>
+                <Icons.Settings size={20} /> {t("settings.title")}
               </h2>
               <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
                 <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.username").toUpperCase()}</p>
                 <p className="font-bold">{user?.username}</p>
-              </div>
-              <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
-                <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.user_id").toUpperCase()}</p>
-                <code className="text-xs" style={{ color: "var(--accent-cyan)" }}>{user?.id}</code>
               </div>
               <div className="p-4 rounded-xl" style={{ background: "var(--bg-input)", border: "2px solid var(--border-card)" }}>
                 <p className="text-xs font-bold mb-1" style={{ color: "var(--text-muted)" }}>{t("settings.server").toUpperCase()}</p>
@@ -3167,11 +3334,54 @@ function MainChat() {
                 </div>
               </div>
               <button
+                onClick={async () => {
+                  try {
+                    const res = await api.get("/friends/blocked");
+                    setBlockedUsers(res.data);
+                  } catch { setBlockedUsers([]); }
+                  setBlockedModal(true);
+                }}
+                className="cartoon-btn w-full py-3 flex items-center justify-center gap-2"
+                style={{ background: "var(--bg-input)", color: "var(--text-gray)" }}
+              >
+                <Icons.Ban size={18} /> {t("settings.blocked_users")}
+              </button>
+              <button
                 onClick={() => { logout(); navigate("/login"); }}
                 className="cartoon-btn w-full py-3 flex items-center justify-center gap-2"
                 style={{ background: "var(--accent-red)", color: "#fff" }}
               >
                 <Icons.Trash size={18} /> {t("sidebar.logout")}
+              </button>
+              <button
+                onClick={() => {
+                  setConfirmPassword("");
+                  setConfirmAction({
+                    message: t("settings.delete_account_confirm"),
+                    passwordRequired: true,
+                    onConfirm: async (password) => {
+                      if (!password) return;
+                      setConfirmAction((prev) => prev ? { ...prev, loading: true, error: undefined } : null);
+                      try {
+                        await api.delete("/auth/account", { data: { password } });
+                        setConfirmAction(null);
+                        setConfirmPassword("");
+                        setSendStatus(t("settings.delete_account_success"));
+                        setTimeout(() => { logout(); navigate("/login"); }, 1000);
+                      } catch (err: any) {
+                        setConfirmAction((prev) => prev ? {
+                          ...prev,
+                          loading: false,
+                          error: err?.response?.data?.message || t("settings.delete_account_error"),
+                        } : null);
+                      }
+                    },
+                  });
+                }}
+                className="cartoon-btn w-full py-2 flex items-center justify-center gap-2 text-xs"
+                style={{ background: "transparent", color: "var(--accent-red)", border: "1px solid var(--accent-red)" }}
+              >
+                <Icons.Trash size={14} /> {t("settings.delete_account")}
               </button>
             </div>
           )}
@@ -3180,13 +3390,10 @@ function MainChat() {
         {/* Right Sidebar - Targets card */}
         <div className="hidden lg:flex flex-col flex-shrink-0" style={{ width: 260 }}>
           <div className="cartoon-card p-4 flex flex-col flex-1 overflow-hidden">
-            <h2 className="font-cartoon text-base mb-1 flex items-center gap-2 flex-shrink-0" style={{ color: "var(--accent-cyan)" }}>
-              <Icons.Users size={18} /> {t("sidebar.friends")}
-            </h2>
             <div className="flex items-center justify-between mb-3 flex-shrink-0">
-              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                {onlineCount} {t("friends.online").toLowerCase()}
-              </p>
+              <h2 className="font-cartoon text-base flex items-center gap-2" style={{ color: "var(--accent-cyan)" }}>
+                <Icons.Send size={18} /> {t("sidebar.targets")}
+              </h2>
               {user && (
                 <button
                   onClick={() => { if (!selfDefault) handleTargetToggle(user.id); }}
@@ -3258,8 +3465,10 @@ function MainChat() {
                 <h3 className="text-xs font-bold mb-2 uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
                   {t("sidebar.friends")}
                 </h3>
-                <div className="space-y-1">
-                  {friends.map((friend) => {
+                {(() => {
+                  const onlineFriends = friends.filter((f) => onlineFriendIds.includes(f.id));
+                  const offlineFriends = friends.filter((f) => !onlineFriendIds.includes(f.id));
+                  const renderFriend = (friend: typeof friends[0]) => {
                     const isOnline = onlineFriendIds.includes(friend.id);
                     const isDnd = dndFriendIds.includes(friend.id);
                     const isSelected = selectedTargets.includes(friend.id);
@@ -3272,52 +3481,67 @@ function MainChat() {
                           setContextMenu({ x: e.clientX, y: e.clientY, friendId: friend.id, friendName: friend.username });
                         }}
                         className={`friend-item ${isSelected ? "selected" : ""}`}
+                        style={{ padding: "4px 8px", gap: 6 }}
                       >
-                        <div className="relative">
+                        <div className="relative" style={{ flexShrink: 0 }}>
                           <div
                             className="cartoon-avatar"
                             style={{
                               background: getAvatarColor(friend.username),
-                              width: 30,
-                              height: 30,
-                              fontSize: 12,
+                              width: 24,
+                              height: 24,
+                              fontSize: 10,
                               borderColor: isSelected ? "var(--accent-cyan)" : "#000",
                             }}
                           >
                             {friend.username[0].toUpperCase()}
                           </div>
                           <div
-                            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 ${isOnline && !isDnd ? "online-pulse" : ""}`}
+                            className={`absolute w-2 h-2 rounded-full border ${isOnline && !isDnd ? "online-pulse" : ""}`}
                             style={{
+                              bottom: -1, right: -1,
                               background: isDnd ? "var(--accent-red)" : isOnline ? "var(--accent-green)" : "var(--text-muted)",
                               borderColor: "var(--bg-card)",
                             }}
                           />
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-bold truncate">{friend.username}</p>
-                          <p className="text-xs" style={{ color: isDnd ? "var(--accent-red)" : isOnline ? "var(--accent-green)" : "var(--text-muted)", fontSize: 10 }}>
-                            {isDnd ? t("friends.dnd") : isOnline ? t("friends.online") : t("friends.offline")}
-                          </p>
-                        </div>
+                        <p className="flex-1 min-w-0 text-xs font-bold truncate" style={{ fontSize: 11 }}>{friend.username}</p>
                         <div
-                          className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
+                          className="w-3.5 h-3.5 rounded flex items-center justify-center flex-shrink-0"
                           style={{
                             border: `2px solid ${isSelected ? "var(--accent-cyan)" : "var(--border-card)"}`,
                             background: isSelected ? "var(--accent-cyan)" : "transparent",
                           }}
                         >
-                          {isSelected && <Icons.Zap size={10} className="text-black" />}
+                          {isSelected && <Icons.Zap size={8} className="text-black" />}
                         </div>
                       </div>
                     );
-                  })}
-                  {friends.length === 0 && (
-                    <p className="text-xs text-center py-3" style={{ color: "var(--text-muted)" }}>
-                      {t("friends.no_friends")}
-                    </p>
-                  )}
-                </div>
+                  };
+                  return (
+                    <>
+                      <div className="space-y-0.5">
+                        {onlineFriends.map(renderFriend)}
+                      </div>
+                      {offlineFriends.length > 0 && (
+                        <details className="mt-2" style={{ cursor: "pointer" }}>
+                          <summary className="text-xs font-bold uppercase tracking-wider flex items-center gap-1 select-none" style={{ color: "var(--text-muted)", fontSize: 10, listStyle: "none" }}>
+                            <Icons.ChevronDown size={12} style={{ color: "var(--text-muted)", transition: "transform 0.2s" }} className="offline-chevron" />
+                            {t("friends.offline")} ({offlineFriends.length})
+                          </summary>
+                          <div className="space-y-0.5 mt-1">
+                            {offlineFriends.map(renderFriend)}
+                          </div>
+                        </details>
+                      )}
+                      {friends.length === 0 && (
+                        <p className="text-xs text-center py-3" style={{ color: "var(--text-muted)" }}>
+                          {t("friends.no_friends")}
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           </div>

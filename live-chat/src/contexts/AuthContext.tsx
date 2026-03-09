@@ -26,6 +26,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = useCallback(() => {
     localStorage.removeItem("token");
     localStorage.removeItem("refreshToken");
+    localStorage.removeItem("username");
     setToken(null);
     setUser(null);
   }, []);
@@ -37,6 +38,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // api interceptor handles 401 -> refresh automatically
           const response = await api.get("/auth/me");
           setUser(response.data);
+          localStorage.setItem("username", response.data.username);
           // Update token in state if it was refreshed by interceptor
           const currentToken = localStorage.getItem("token");
           if (currentToken && currentToken !== token) {
@@ -63,6 +65,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = useCallback((newToken: string, newUser: User, refreshToken?: string) => {
     localStorage.setItem("token", newToken);
+    localStorage.setItem("username", newUser.username);
     if (refreshToken) {
       localStorage.setItem("refreshToken", refreshToken);
     }

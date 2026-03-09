@@ -12,6 +12,7 @@ export default function Updater() {
   const [progress, setProgress] = useState(0);
   const [update, setUpdate] = useState<Update | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
     checkForUpdate();
@@ -51,7 +52,9 @@ export default function Updater() {
         }
       });
       setStatus("installing");
-    } catch {
+    } catch (err: any) {
+      console.error("Update error:", err);
+      setErrorMsg(String(err?.message || err));
       setStatus("error");
     }
   }
@@ -188,7 +191,8 @@ export default function Updater() {
       )}
 
       {status === "error" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ color: "var(--accent-red)", fontWeight: 600, fontSize: 13 }}>
             {t("updater.error")}
           </span>
@@ -205,6 +209,12 @@ export default function Updater() {
           >
             x
           </button>
+          </div>
+          {errorMsg && (
+            <div style={{ color: "var(--text-muted)", fontSize: 11, wordBreak: "break-all" }}>
+              {errorMsg}
+            </div>
+          )}
         </div>
       )}
     </div>

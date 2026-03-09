@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { updatePseudo } from "../shared";
 import { Icons } from "./Icons";
+import { t } from "../i18n";
 
 interface WelcomeScreenProps {
   onComplete: () => void;
@@ -90,7 +91,7 @@ function WelcomeScreen({ onComplete }: WelcomeScreenProps) {
                 setPseudo(e.target.value);
                 setError("");
               }}
-              placeholder="Entrez votre pseudo..."
+              placeholder={t("settings.welcome_pseudo_placeholder")}
               className="input-dark w-full text-lg"
               style={{ padding: '16px 20px' }}
               maxLength={20}

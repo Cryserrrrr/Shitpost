@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { GroupsService } from "../services/GroupsService";
 import { authMiddleware } from "../middleware/AuthMiddleware";
+import { sanitizeString } from "../middleware/SecurityMiddleware";
 
 const router = Router();
 
@@ -8,7 +9,9 @@ router.use(authMiddleware);
 
 router.post("/", async (req, res) => {
   try {
-    const { name, description } = req.body;
+    const name = sanitizeString(req.body.name, 50);
+    const description = sanitizeString(req.body.description, 500);
+    if (!name || name.length < 1) return res.status(400).json({ message: "Group name is required" });
     const result = await GroupsService.createGroup((req as any).userId, name, description);
     res.status(201).json(result);
   } catch (error: any) {
@@ -28,7 +31,7 @@ router.get("/", async (req, res) => {
 // Invite a member (replaces direct add)
 router.post("/:id/members", async (req, res) => {
   try {
-    const { username } = req.body;
+    const username = sanitizeString(req.body.username, 20);
     const result = await GroupsService.inviteMember(req.params.id, (req as any).userId, username);
 
     // Notify invitee in real-time
@@ -172,8 +175,8 @@ router.patch("/:id/members/:userId/role", async (req, res) => {
 
 router.patch("/:id", async (req, res) => {
   try {
-    const { name } = req.body;
-    if (!name?.trim()) return res.status(400).json({ message: "Name is required" });
+    const name = sanitizeString(req.body.name, 50);
+    if (!name) return res.status(400).json({ message: "Name is required" });
     const result = await GroupsService.renameGroup(req.params.id, (req as any).userId, name);
     res.json(result);
   } catch (error: any) {

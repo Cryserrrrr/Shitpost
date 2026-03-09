@@ -95,19 +95,55 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     }
 }
 
+#[derive(serde::Serialize)]
+struct FileEntry {
+    name: String,
+    mtime_ms: u64,
+}
+
+#[tauri::command]
+fn list_files_sorted(dir: String) -> Result<Vec<FileEntry>, String> {
+    let mut entries: Vec<FileEntry> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            let mtime_ms = metadata
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_millis() as u64;
+            Some(FileEntry { name, mtime_ms })
+        })
+        .collect();
+    entries.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    Ok(entries)
+}
+
 fn main() {
     // Allow autoplay with sound in WebView2 (needed for overlay which is non-focusable)
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--autoplay-policy=no-user-gesture-required");
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Another instance was launched — focus the existing main window
+    let mut builder = tauri::Builder::default();
+
+    // Only enforce single instance in release mode so dev and bundled app can run side by side
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             }
-        }))
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -118,7 +154,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![get_autostart, set_autostart, set_overlay_interactive, list_monitors, set_overlay_monitor])
+        .invoke_handler(tauri::generate_handler![get_autostart, set_autostart, set_overlay_interactive, list_monitors, set_overlay_monitor, list_files_sorted])
         .setup(|app| {
             // Setup overlay window
             let overlay_window = app.get_webview_window("overlay").unwrap();

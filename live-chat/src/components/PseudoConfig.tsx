@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { SHARED_CONFIG, updatePseudo } from "../shared";
 import { Icons } from "./Icons";
+import { t } from "../i18n";
 
 interface PseudoConfigProps {
   onClose: () => void;
@@ -82,7 +83,7 @@ function PseudoConfig({ onClose }: PseudoConfigProps) {
                 setPseudo(e.target.value);
                 setError("");
               }}
-              placeholder="Entrez votre nouveau pseudo..."
+              placeholder={t("settings.pseudo_placeholder")}
               className="input-dark w-full"
               maxLength={20}
               autoFocus

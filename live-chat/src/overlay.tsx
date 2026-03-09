@@ -82,8 +82,11 @@ function Overlay() {
       // Clear any existing display
       cleanup();
 
-      // Save to history + auto-save to memes folder
-      if (data.mediaBuffer) {
+      // Save to history + auto-save to memes folder (skip if sent to self)
+      const myUsername = localStorage.getItem("username");
+      const isSelf = myUsername && data.senderName === myUsername;
+
+      if (data.mediaBuffer && !isSelf) {
         try {
           const { addHistoryEntry } = await import("./services/historyDb");
           await addHistoryEntry({

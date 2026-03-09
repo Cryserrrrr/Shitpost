@@ -29,6 +29,12 @@ const RegisterPage: React.FC = () => {
       return;
     }
 
+    if (/\s/.test(username)) {
+      setError(t("auth.username_no_spaces"));
+      setIsSubmitting(false);
+      return;
+    }
+
     if (password.length < 6) {
       setError(t("auth.password_length"));
       setIsSubmitting(false);
@@ -115,9 +121,9 @@ const RegisterPage: React.FC = () => {
               type="text"
               required
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={(e) => setUsername(e.target.value.replace(/\s/g, ""))}
               className="cartoon-input w-full"
-              placeholder="TonPseudo"
+              placeholder={t("auth.username_placeholder")}
               maxLength={20}
             />
           </div>

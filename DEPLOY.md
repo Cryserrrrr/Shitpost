@@ -30,6 +30,15 @@ This guide covers deploying the **server** on a VPS using [Coolify](https://cool
    - **Start Command**: `npm start`
    - **Port**: `3000`
 
+## Step 2b: Create a Redis instance (optional but recommended)
+
+1. In Coolify dashboard, go to **Resources** > **New** > **Database** > **Redis**
+2. Configure:
+   - Name: `shitpost-redis`
+3. Deploy and note the internal URL (e.g. `redis://shitpost-redis:6379`)
+
+Redis is used for caching (friends list, rate limiting) and Socket.io adapter (multi-instance). If not configured, the server falls back to in-memory stores.
+
 ## Step 3: Set environment variables
 
 In the application settings, add these environment variables:
@@ -40,6 +49,8 @@ JWT_SECRET=<generate with: openssl rand -hex 64>
 PORT=3000
 NODE_ENV=production
 ALLOWED_ORIGINS=tauri://localhost,https://your-domain.com
+REDIS_URL=redis://shitpost-redis:6379
+FORCE_HTTPS=true
 ```
 
 > Replace `shitpost-db` with the actual internal hostname of your database from Step 1.
@@ -58,7 +69,7 @@ Click **Deploy** and wait for the build to complete.
 Verify the server is running:
 ```bash
 curl https://api.shitpost.example.com/health
-# Should return: {"status":"ok","uptime":...,"connections":0}
+# Should return: {"status":"ok","uptime":...,"connections":0,"redis":true}
 ```
 
 ## Step 6: Build and distribute the Tauri app

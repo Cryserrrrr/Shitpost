@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readDir, readFile, remove, mkdir, exists, stat } from "@tauri-apps/plugin-fs";
+import { readFile, remove, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
 import { saveToMemesFolder } from "../services/memesUtils";
 import { Icons } from "./Icons";
 
@@ -229,31 +230,23 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
       if (!dirExists) {
         await mkdir(folderPath, { recursive: true });
       }
-      const entries = await readDir(folderPath);
-      const mediaEntries = entries.filter((e) => e.name && isMediaFile(e.name));
 
-      // Build list with modification times for sorting
-      const mediaFiles: (MemeFile & { mtime: number })[] = await Promise.all(
-        mediaEntries.map(async (e) => {
-          const filePath = `${folderPath}\\${e.name}`;
-          let mtime = 0;
-          try {
-            const info = await stat(filePath);
-            mtime = info.mtime?.getTime() ?? 0;
-          } catch {}
-          return {
-            name: e.name!,
-            path: filePath,
-            isVideo: isVideoFile(e.name!),
-            isAudio: isAudioFile(e.name!),
-            category: getCategory(e.name!),
-            dataUrl: "",
-            mtime,
-          };
-        })
-      );
+      // Use Rust command for reliable modification times on Windows/OneDrive
+      const entries: { name: string; mtime_ms: number }[] = await invoke("list_files_sorted", { dir: folderPath });
+      const sep = folderPath.includes("/") ? "/" : "\\";
 
-      mediaFiles.sort((a, b) => b.mtime - a.mtime);
+      // Already sorted by mtime descending from Rust
+      const mediaFiles: MemeFile[] = entries
+        .filter((e) => isMediaFile(e.name))
+        .map((e) => ({
+          name: e.name,
+          path: `${folderPath}${sep}${e.name}`,
+          isVideo: isVideoFile(e.name),
+          isAudio: isAudioFile(e.name),
+          category: getCategory(e.name),
+          dataUrl: "",
+        }));
+
       setMemes(mediaFiles);
     } catch (err) {
       console.error("Failed to load memes:", err);

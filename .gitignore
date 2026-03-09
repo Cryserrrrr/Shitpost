@@ -31,3 +31,7 @@ npm-debug.log*
 
 # Tauri build
 live-chat/src-tauri/target/
+
+# Mockups
+mockup/
+mockup-viewer/

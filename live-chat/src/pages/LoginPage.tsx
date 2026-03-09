@@ -105,7 +105,7 @@ const LoginPage: React.FC = () => {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="cartoon-input w-full"
-              placeholder="TonPseudo"
+              placeholder={t("auth.username_placeholder")}
             />
           </div>
 
@@ -119,7 +119,7 @@ const LoginPage: React.FC = () => {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="cartoon-input w-full"
-              placeholder="********"
+              placeholder={t("auth.password_placeholder_dots")}
             />
           </div>
 
