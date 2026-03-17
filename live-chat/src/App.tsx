@@ -14,6 +14,16 @@ import HistoryTab from "./components/HistoryTab";
 import Updater from "./components/Updater";
 
 
+/** Auto-cleared timeout — cancels on unmount or when called again */
+function useAutoTimeout() {
+  const ref = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (ref.current) clearTimeout(ref.current); }, []);
+  return useCallback((fn: () => void, ms: number) => {
+    if (ref.current) clearTimeout(ref.current);
+    ref.current = setTimeout(() => { ref.current = null; fn(); }, ms);
+  }, []);
+}
+
 const TIMEOUT_LIMITS = { min: 1000, maxImage: 10000, maxVideo: 30000, step: 500 } as const;
 const SEGMENT_COLORS = ["var(--accent-cyan)", "var(--accent-pink)", "var(--accent-green)", "var(--accent-yellow)", "var(--accent-purple)", "var(--accent-orange)"];
 const segColor = (i: number) => SEGMENT_COLORS[i % SEGMENT_COLORS.length];
@@ -64,6 +74,8 @@ function MainChat() {
   const { t, lang, setLang } = useLang();
   const navigate = useNavigate();
   const socketRef = useRef<Socket | null>(null);
+  const clearStatusAfter = useAutoTimeout();
+  const clearDropAfter = useAutoTimeout();
   const [socketConnected, setSocketConnected] = useState(false);
   const [friends, setFriends] = useState<any[]>([]);
   const [myInviteCode, setMyInviteCode] = useState<string>("");
@@ -289,7 +301,7 @@ function MainChat() {
         if (dndCount > 0) parts.push(`${dndCount} ${t("settings.dnd").toLowerCase()}`);
         setSendStatus(`${t("media.sent")} (${parts.join(", ")})`);
       }
-      setTimeout(() => setSendStatus(null), 2000);
+      clearStatusAfter(() => setSendStatus(null), 2000);
     });
 
     fetchData();
@@ -482,7 +494,7 @@ function MainChat() {
       const maxSize = file.type.startsWith("video/") ? MAX_FILE_SIZE.video : file.type.startsWith("audio/") ? MAX_FILE_SIZE.audio : MAX_FILE_SIZE.image;
       if (file.size > maxSize) {
         setSendStatus(t("media.file_too_large").replace("{max}", String(Math.round(maxSize / 1024 / 1024))));
-        setTimeout(() => setSendStatus(null), 3000);
+        clearStatusAfter(() => setSendStatus(null), 3000);
         if (fileInputRef.current) fileInputRef.current.value = "";
         return;
       }
@@ -502,7 +514,7 @@ function MainChat() {
         setSendStatus(
           t("media.file_too_large").replace("{max}", String(Math.round(MAX_FILE_SIZE.audio / 1024 / 1024))),
         );
-        setTimeout(() => setSendStatus(null), 3000);
+        clearStatusAfter(() => setSendStatus(null), 3000);
         if (audioInputRef.current) audioInputRef.current.value = "";
         return;
       }
@@ -547,7 +559,7 @@ function MainChat() {
           setSendStatus(
             t("media.file_too_large").replace("{max}", String(Math.round(maxSize / 1024 / 1024))),
           );
-          setTimeout(() => setSendStatus(null), 3000);
+          clearStatusAfter(() => setSendStatus(null), 3000);
           return;
         }
         const reader = new FileReader();
@@ -583,7 +595,7 @@ function MainChat() {
           // Limit number of files to prevent crashes
           if (paths.length > MAX_DROP_FILES) {
             setSendStatus(t("media.too_many_files").replace("{max}", String(MAX_DROP_FILES)));
-            setTimeout(() => setSendStatus(null), 3000);
+            clearStatusAfter(() => setSendStatus(null), 3000);
             paths = paths.slice(0, MAX_DROP_FILES);
           }
 
@@ -613,7 +625,7 @@ function MainChat() {
             setSendStatus(
               t("media.file_too_large").replace("{max}", String(Math.round(maxMb / 1024 / 1024))),
             );
-            setTimeout(() => setSendStatus(null), 3000);
+            clearStatusAfter(() => setSendStatus(null), 3000);
           }
           paths = validPaths;
           if (paths.length === 0) return;
@@ -634,7 +646,7 @@ function MainChat() {
             } catch (err) {
               console.error("Failed to save to memes folder:", err);
             }
-            setTimeout(() => setDropProgress(null), 800);
+            clearDropAfter(() => setDropProgress(null), 800);
           }
 
           // If single file, load into shitpost
@@ -687,7 +699,7 @@ function MainChat() {
             }
           } else {
             setSendStatus(`${paths.length} shitposts ${t("memes.added").toLowerCase()}`);
-            setTimeout(() => setSendStatus(null), 2000);
+            clearStatusAfter(() => setSendStatus(null), 2000);
           }
         }
       });
@@ -998,6 +1010,36 @@ function MainChat() {
     }
   }, [selectedTargets, mediaData, textData, timeoutMs, audioData, audioTrimStart, audioTrimEnd, createPreview, compressVideo, trimAudio, segments, loopCount, videoMuteOriginal]);
 
+  // Shared handler for selecting a meme from library/history into the editor
+  const handleSelectMemeForEditor = useCallback((dataUrl: string, mimeType: string, mediaType: "image" | "video" | "audio") => {
+    setMediaData({ type: mediaType, data: dataUrl, mimeType });
+    setAudioData(null);
+    setTextData({ topText: "", bottomText: "" });
+    setPreviewMuted(mediaType !== "audio");
+    if (mediaType === "video" || mediaType === "audio") {
+      const el = document.createElement(mediaType === "video" ? "video" : "audio");
+      el.src = dataUrl;
+      el.onloadedmetadata = () => {
+        const dur = el.duration;
+        setVideoDuration(dur);
+        const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
+        setSegments([{ start: 0, end: maxTrim }]);
+        setActiveSegment(0);
+        setTimeoutMs(Math.round(maxTrim * 1000));
+      };
+    } else {
+      setVideoDuration(0);
+      setSegments([]);
+      setActiveSegment(0);
+    }
+    setActiveTab("media");
+  }, []);
+
+  const handleStatusMessage = useCallback((msg: string) => {
+    setSendStatus(msg);
+    clearStatusAfter(() => setSendStatus(null), 2000);
+  }, [clearStatusAfter]);
+
   const handleTargetToggle = (id: string) => {
     setSelectedTargets((prev) =>
       prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]
@@ -1030,10 +1072,10 @@ function MainChat() {
       setSearchQuery("");
       fetchData();
       setSendStatus(t("friends.request_sent"));
-      setTimeout(() => setSendStatus(null), 2000);
+      clearStatusAfter(() => setSendStatus(null), 2000);
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1087,12 +1129,12 @@ function MainChat() {
       } else if (modal?.type === "addMember" && modal.groupId) {
         await api.post(`/groups/${modal.groupId}/members`, { username: modalInput });
         setSendStatus(t("groups.invite_sent"));
-        setTimeout(() => setSendStatus(null), 2000);
+        clearStatusAfter(() => setSendStatus(null), 2000);
       }
       setModal(null);
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1106,17 +1148,17 @@ function MainChat() {
             await api.post(`/groups/join/${code}`);
             fetchData();
             setSendStatus(t("friends.accept"));
-            setTimeout(() => setSendStatus(null), 2000);
+            clearStatusAfter(() => setSendStatus(null), 2000);
           } catch (err: any) {
             setSendStatus(err.response?.data?.message || t("general.error"));
-            setTimeout(() => setSendStatus(null), 3000);
+            clearStatusAfter(() => setSendStatus(null), 3000);
           }
           setConfirmAction(null);
         },
       });
     }).catch(() => {
       setSendStatus(t("general.error"));
-      setTimeout(() => setSendStatus(null), 2000);
+      clearStatusAfter(() => setSendStatus(null), 2000);
     });
   }, [fetchData, t]);
 
@@ -1137,17 +1179,17 @@ function MainChat() {
               await api.post("/friends/add-direct", { code });
               fetchData();
               setSendStatus(t("friends.request_sent"));
-              setTimeout(() => setSendStatus(null), 2000);
+              clearStatusAfter(() => setSendStatus(null), 2000);
             } catch (err: any) {
               setSendStatus(err.response?.data?.message || t("general.error"));
-              setTimeout(() => setSendStatus(null), 3000);
+              clearStatusAfter(() => setSendStatus(null), 3000);
             }
             setConfirmAction(null);
           },
         });
       }).catch(() => {
         setSendStatus(t("general.error"));
-        setTimeout(() => setSendStatus(null), 2000);
+        clearStatusAfter(() => setSendStatus(null), 2000);
       });
       return;
     }
@@ -1172,10 +1214,10 @@ function MainChat() {
               await api.post("/friends/add-direct", { code });
               fetchData();
               setSendStatus(t("friends.request_sent"));
-              setTimeout(() => setSendStatus(null), 2000);
+              clearStatusAfter(() => setSendStatus(null), 2000);
             } catch (err: any) {
               setSendStatus(err.response?.data?.message || t("general.error"));
-              setTimeout(() => setSendStatus(null), 3000);
+              clearStatusAfter(() => setSendStatus(null), 3000);
             }
             setConfirmAction(null);
           },
@@ -1214,7 +1256,7 @@ function MainChat() {
       fetchData();
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1224,7 +1266,7 @@ function MainChat() {
       fetchData();
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1234,7 +1276,7 @@ function MainChat() {
       fetchData();
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1246,7 +1288,7 @@ function MainChat() {
       setOnlineFriendIds((prev) => prev.filter((id) => id !== friendId));
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1258,7 +1300,7 @@ function MainChat() {
       setOnlineFriendIds((prev) => prev.filter((id) => id !== userId));
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1269,7 +1311,7 @@ function MainChat() {
       setModal(null);
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1280,7 +1322,7 @@ function MainChat() {
       setModal(null);
     } catch (err: any) {
       setSendStatus(err.response?.data?.message || t("general.error"));
-      setTimeout(() => setSendStatus(null), 3000);
+      clearStatusAfter(() => setSendStatus(null), 3000);
     }
   };
 
@@ -1462,11 +1504,11 @@ function MainChat() {
                             try {
                               await api.post(`/groups/${modal.groupId}/members`, { username: friend.username });
                               setSendStatus(t("groups.invite_sent"));
-                              setTimeout(() => setSendStatus(null), 2000);
+                              clearStatusAfter(() => setSendStatus(null), 2000);
                               setModal(null);
                             } catch (err: any) {
                               setSendStatus(err.response?.data?.message || t("general.error"));
-                              setTimeout(() => setSendStatus(null), 3000);
+                              clearStatusAfter(() => setSendStatus(null), 3000);
                             }
                           }}
                           className="friend-item cursor-pointer"
@@ -1545,7 +1587,7 @@ function MainChat() {
                     onClick={() => {
                       navigator.clipboard.writeText(`#${group.inviteCode}`);
                       setSendStatus(t("groups.code_copied"));
-                      setTimeout(() => setSendStatus(null), 2000);
+                      clearStatusAfter(() => setSendStatus(null), 2000);
                     }}
                     className="cartoon-btn w-full py-1.5 text-xs mb-3"
                     style={{ background: "var(--bg-input)", fontSize: 11 }}
@@ -2821,66 +2863,16 @@ function MainChat() {
           {activeTab === "memes" && (
             <MemesTab
               t={t}
-              onStatus={(msg) => {
-                setSendStatus(msg);
-                setTimeout(() => setSendStatus(null), 2000);
-              }}
-              onSelectMeme={(dataUrl, mimeType, mediaType) => {
-                setMediaData({ type: mediaType, data: dataUrl, mimeType });
-                setAudioData(null);
-                setTextData({ topText: "", bottomText: "" });
-                setPreviewMuted(mediaType !== "audio");
-                if (mediaType === "video" || mediaType === "audio") {
-                  const el = document.createElement(mediaType === "video" ? "video" : "audio");
-                  el.src = dataUrl;
-                  el.onloadedmetadata = () => {
-                    const dur = el.duration;
-                    setVideoDuration(dur);
-                    const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
-                    setSegments([{ start: 0, end: maxTrim }]);
-                    setActiveSegment(0);
-                    setTimeoutMs(Math.round(maxTrim * 1000));
-                  };
-                } else {
-                  setVideoDuration(0);
-                  setSegments([]);
-                  setActiveSegment(0);
-                }
-                setActiveTab("media");
-              }}
+              onStatus={handleStatusMessage}
+              onSelectMeme={handleSelectMemeForEditor}
             />
           )}
 
           {activeTab === "history" && (
             <HistoryTab
               t={t}
-              onStatus={(msg) => {
-                setSendStatus(msg);
-                setTimeout(() => setSendStatus(null), 2000);
-              }}
-              onSelectMeme={(dataUrl, mimeType, mediaType) => {
-                setMediaData({ type: mediaType, data: dataUrl, mimeType });
-                setAudioData(null);
-                setTextData({ topText: "", bottomText: "" });
-                setPreviewMuted(mediaType !== "audio");
-                if (mediaType === "video" || mediaType === "audio") {
-                  const el = document.createElement(mediaType === "video" ? "video" : "audio");
-                  el.src = dataUrl;
-                  el.onloadedmetadata = () => {
-                    const dur = el.duration;
-                    setVideoDuration(dur);
-                    const maxTrim = Math.min(dur, TIMEOUT_LIMITS.maxVideo / 1000);
-                    setSegments([{ start: 0, end: maxTrim }]);
-                    setActiveSegment(0);
-                    setTimeoutMs(Math.round(maxTrim * 1000));
-                  };
-                } else {
-                  setVideoDuration(0);
-                  setSegments([]);
-                  setActiveSegment(0);
-                }
-                setActiveTab("media");
-              }}
+              onStatus={handleStatusMessage}
+              onSelectMeme={handleSelectMemeForEditor}
             />
           )}
 
@@ -2914,7 +2906,7 @@ function MainChat() {
                     onClick={() => {
                       navigator.clipboard.writeText(`#${myInviteCode}`);
                       setSendStatus(t("friends.code_copied"));
-                      setTimeout(() => setSendStatus(null), 2000);
+                      clearStatusAfter(() => setSendStatus(null), 2000);
                     }}
                     className="cartoon-btn w-full py-1.5 text-xs"
                     style={{ background: "var(--bg-input)", fontSize: 11 }}

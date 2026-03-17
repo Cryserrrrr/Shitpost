@@ -129,7 +129,7 @@ function Overlay() {
 
       // Play audio
       const volume = Math.min(Math.max(Number(localStorage.getItem("memeVolume") ?? 100), 0), 100) / 100;
-      console.log("[MEDIA] Type:", data.mediaType, "| MIME:", data.mimeType, "| Volume:", volume, "| Buffer size:", data.mediaBuffer?.length);
+      if (import.meta.env.DEV) console.log("[MEDIA] Type:", data.mediaType, "| MIME:", data.mimeType, "| Volume:", volume);
 
       // Helper: play audio — try ref element, then new Audio(), then AudioContext
       const playAudioBlob = async (base64: string, mime: string) => {
@@ -228,7 +228,7 @@ function Overlay() {
     });
 
     newSocket.on("connect", () => {
-      console.log("Overlay connected");
+      if (import.meta.env.DEV) console.log("Overlay connected");
       setConnectionStatus("Connected");
     });
 
@@ -237,7 +237,7 @@ function Overlay() {
     });
 
     newSocket.on("connect_error", (error) => {
-      console.error("Overlay connection error:", error.message);
+      if (import.meta.env.DEV) console.error("Overlay connection error:", error.message);
       setConnectionStatus("Error");
       if (error.message.includes("Authentication error")) {
         // Don't refresh here — the main window handles refresh.
@@ -253,7 +253,7 @@ function Overlay() {
     });
 
     newSocket.on("media:show", (data: MediaData) => {
-      console.log(`Shitpost received from ${data.senderName || "unknown"}!`);
+      if (import.meta.env.DEV) console.log(`Shitpost received from ${data.senderName || "unknown"}!`);
       showMedia(data);
     });
 
@@ -338,9 +338,37 @@ function Overlay() {
     }
   };
 
+  // Convert base64 media to Blob URL for efficient memory usage
+  const mediaUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!media?.mediaBuffer) {
+      if (mediaUrlRef.current) {
+        URL.revokeObjectURL(mediaUrlRef.current);
+        mediaUrlRef.current = null;
+      }
+      return;
+    }
+    try {
+      const binary = atob(media.mediaBuffer);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: media.mimeType });
+      const url = URL.createObjectURL(blob);
+      mediaUrlRef.current = url;
+    } catch {
+      // fallback handled below
+    }
+    return () => {
+      if (mediaUrlRef.current) {
+        URL.revokeObjectURL(mediaUrlRef.current);
+        mediaUrlRef.current = null;
+      }
+    };
+  }, [media?.mediaBuffer, media?.mimeType]);
+
   if (!media || animState === "hidden") return null;
 
-  const mediaUrl = `data:${media.mimeType};base64,${media.mediaBuffer}`;
+  const mediaUrl = mediaUrlRef.current || `data:${media.mimeType};base64,${media.mediaBuffer}`;
 
   return (
     <div className="overlay-container">

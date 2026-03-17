@@ -45,7 +45,7 @@ const io = new Server(httpServer, {
     credentials: true,
   },
   allowEIO3: true,
-  maxHttpBufferSize: 100 * 1024 * 1024,
+  maxHttpBufferSize: 50 * 1024 * 1024, // 50MB — enough for compressed media
   pingTimeout: 60000,
   pingInterval: 25000,
 });

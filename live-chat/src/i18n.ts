@@ -174,6 +174,7 @@ const translations = {
     "history.sent": "Envoye",
     "history.received": "Recu",
     "history.all": "Tout",
+    "history.load_more": "Charger plus...",
 
     // Overlay
     "overlay.from": "de",
@@ -377,6 +378,7 @@ const translations = {
     "history.sent": "Sent",
     "history.received": "Received",
     "history.all": "All",
+    "history.load_more": "Load more...",
 
     // Overlay
     "overlay.from": "from",

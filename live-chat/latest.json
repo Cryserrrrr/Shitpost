@@ -1,11 +1,11 @@
 {
-  "version": "0.2.0",
-  "notes": "v0.2.0",
+  "version": "0.3.0",
+  "notes": "0.3.0",
   "pub_date": "2026-03-08T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa3ZrQTNtOCtURVRiekxRSVk5NlByb2UrNzdvbjk4b3VCaThFZC9yekM4ZlhLVGhmbnBhb3YyR1BOdUQ1bktBWE5EWDNBZXdidCtQdWdBS1lHeTVnbjlqL2FZazJ2TlE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzczMDAzNDA4CWZpbGU6U2hpdHBvc3RfMC4yLjBfeDY0LXNldHVwLmV4ZQpXMTFIOFdXU2loMCticUI1RWxXV0xFTjd6WnFEZWJWNGRPb2I4cVhKY3Jvb09iVkVHTHRlWGNmdk9aV3BwNEdpR2ZFUWtMT3p4QkEzV2dKVkNxRjRDQT09Cg==",
-      "url": "https://github.com/Cryserrrrr/Shitpost/releases/download/v0.2.0/Shitpost_0.2.0_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa3ZrQTNtOCtURVEwK0RwZ0tNd1cxNk1DTGFkbFJ4TWdpSzBOKzByTGcySDBZUWQ0VFhKekplRlNKWGpIajBMN3FMa3d4aWh6SU4vZzJoeitSWVFHYTY3bk90K2oxbWdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzczMDcwNzcyCWZpbGU6U2hpdHBvc3RfMC4zLjBfeDY0LXNldHVwLmV4ZQo4L0VxUkRLSnp1aCthcGtSQ3pGRTYyZW5zMTk3dWRIWW9RZWozeldsVFdJajVtOVZzZGh0d0lKWGxtY0pUMzM0UzVnZlAwbkdjN29KZ2RkNGd5d1JBQT09Cg==",
+      "url": "https://github.com/Cryserrrrr/Shitpost/releases/download/0.3.0/Shitpost_0.3.0_x64-setup.exe"
     }
   }
 }

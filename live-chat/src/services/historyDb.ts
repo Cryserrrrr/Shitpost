@@ -14,6 +14,9 @@ export interface HistoryEntry {
   };
 }
 
+/** Lightweight entry without the heavy media payload */
+export type HistoryMeta = Omit<HistoryEntry, "mediaBase64">;
+
 const DB_NAME = "shitpost-history";
 const STORE_NAME = "entries";
 const DB_VERSION = 1;
@@ -43,6 +46,89 @@ export async function addHistoryEntry(entry: HistoryEntry): Promise<void> {
   });
 }
 
+/**
+ * Get total number of entries in the store.
+ */
+export async function getHistoryCount(): Promise<number> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const req = tx.objectStore(STORE_NAME).count();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Get a page of history metadata (without mediaBase64) using a cursor.
+ * Results are sorted by timestamp descending (newest first).
+ */
+export async function getHistoryPage(
+  page: number,
+  pageSize: number,
+  directionFilter?: "sent" | "received"
+): Promise<{ items: HistoryMeta[]; total: number }> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+    const index = store.index("timestamp");
+
+    // Count total (respecting filter)
+    let total = 0;
+    const items: HistoryMeta[] = [];
+    const skip = page * pageSize;
+    let skipped = 0;
+    let collected = 0;
+
+    // Walk backwards (newest first) using 'prev' direction
+    const cursorReq = index.openCursor(null, "prev");
+    cursorReq.onsuccess = () => {
+      const cursor = cursorReq.result;
+      if (!cursor) {
+        resolve({ items, total });
+        return;
+      }
+
+      const entry = cursor.value as HistoryEntry;
+      const matchesFilter = !directionFilter || entry.direction === directionFilter;
+
+      if (matchesFilter) {
+        total++;
+        if (skipped < skip) {
+          skipped++;
+        } else if (collected < pageSize) {
+          // Strip mediaBase64 to keep memory low
+          const { mediaBase64: _, ...meta } = entry;
+          items.push(meta);
+          collected++;
+        }
+      }
+
+      cursor.continue();
+    };
+    cursorReq.onerror = () => reject(cursorReq.error);
+  });
+}
+
+/**
+ * Get media data for a single entry by ID.
+ * Returns only the base64 string, or null if not found.
+ */
+export async function getHistoryMedia(id: string): Promise<string | null> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const req = tx.objectStore(STORE_NAME).get(id);
+    req.onsuccess = () => {
+      const entry = req.result as HistoryEntry | undefined;
+      resolve(entry?.mediaBase64 ?? null);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** @deprecated Use getHistoryPage instead — this loads ALL entries into memory */
 export async function getAllHistory(): Promise<HistoryEntry[]> {
   const db = await openDb();
   return new Promise((resolve, reject) => {

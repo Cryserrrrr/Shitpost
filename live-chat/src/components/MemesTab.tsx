@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile, remove, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -14,7 +14,6 @@ interface MemeFile {
   isVideo: boolean;
   isAudio: boolean;
   category: MediaCategory;
-  dataUrl: string;
 }
 
 const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"];
@@ -24,6 +23,9 @@ const AUDIO_EXTS = [".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".wma", ".o
 const ALL_EXTS = [...IMAGE_EXTS, ...GIF_EXTS, ...VIDEO_EXTS, ...AUDIO_EXTS];
 const MAX_FILE_SIZE = { image: 100 * 1024 * 1024, video: 500 * 1024 * 1024, audio: 50 * 1024 * 1024 } as const;
 const MAX_DROP_FILES = 50;
+
+/** Max number of Blob URLs to keep in the LRU cache */
+const BLOB_CACHE_MAX = 80;
 
 function isMediaFile(name: string): boolean {
   const lower = name.toLowerCase();
@@ -76,39 +78,97 @@ function getMimeType(name: string): string {
   return "application/octet-stream";
 }
 
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+/**
+ * Simple LRU cache for Blob URLs.
+ * Automatically revokes the oldest Blob URLs when the cache exceeds maxSize.
+ */
+class BlobUrlCache {
+  private map = new Map<string, string>(); // path -> blobUrl
+  private order: string[] = []; // access order (newest at end)
+  private maxSize: number;
+
+  constructor(maxSize: number) {
+    this.maxSize = maxSize;
   }
-  return btoa(binary);
+
+  get(key: string): string | undefined {
+    const url = this.map.get(key);
+    if (url) {
+      // Move to end (most recently used)
+      this.order = this.order.filter((k) => k !== key);
+      this.order.push(key);
+    }
+    return url;
+  }
+
+  set(key: string, url: string): void {
+    if (this.map.has(key)) {
+      // Update existing: revoke old, set new
+      URL.revokeObjectURL(this.map.get(key)!);
+      this.order = this.order.filter((k) => k !== key);
+    }
+    this.map.set(key, url);
+    this.order.push(key);
+
+    // Evict oldest entries if over capacity
+    while (this.order.length > this.maxSize) {
+      const oldest = this.order.shift()!;
+      const oldUrl = this.map.get(oldest);
+      if (oldUrl) {
+        URL.revokeObjectURL(oldUrl);
+        this.map.delete(oldest);
+      }
+    }
+  }
+
+  has(key: string): boolean {
+    return this.map.has(key);
+  }
+
+  clear(): void {
+    for (const url of this.map.values()) {
+      URL.revokeObjectURL(url);
+    }
+    this.map.clear();
+    this.order = [];
+  }
+
+  delete(key: string): void {
+    const url = this.map.get(key);
+    if (url) {
+      URL.revokeObjectURL(url);
+      this.map.delete(key);
+      this.order = this.order.filter((k) => k !== key);
+    }
+  }
 }
 
 interface MemeCardProps {
   meme: MemeFile;
-  hovered: boolean;
-  onLoad: (meme: MemeFile) => void;
+  blobCache: BlobUrlCache;
+  onRequestLoad: (meme: MemeFile) => void;
   onClick: () => void;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
   onDelete: () => void;
-  videoPreviewRefs: React.MutableRefObject<Map<string, HTMLVideoElement>>;
   t: (key: any) => string;
 }
 
-function MemeCard({ meme, hovered, onLoad, onClick, onMouseEnter, onMouseLeave, onDelete, videoPreviewRefs, t }: MemeCardProps) {
+const MemeCard = memo(function MemeCard({ meme, blobCache, onRequestLoad, onClick, onDelete, t }: MemeCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const loadTriggered = useRef(false);
+  const [blobUrl, setBlobUrl] = useState<string | undefined>(() => blobCache.get(meme.path));
+  const [hovered, setHovered] = useState(false);
 
+  // Lazy load via IntersectionObserver
   useEffect(() => {
-    if (meme.dataUrl || loadTriggered.current) return;
+    if (blobUrl || loadTriggered.current) return;
     const el = cardRef.current;
     if (!el) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting && !loadTriggered.current) {
           loadTriggered.current = true;
-          onLoad(meme);
+          onRequestLoad(meme);
           observer.disconnect();
         }
       },
@@ -116,9 +176,36 @@ function MemeCard({ meme, hovered, onLoad, onClick, onMouseEnter, onMouseLeave, 
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [meme, onLoad]);
+  }, [blobUrl, meme, onRequestLoad]);
 
-  const loaded = !!meme.dataUrl;
+  // Poll for blob URL availability after load request
+  useEffect(() => {
+    if (blobUrl) return;
+    const interval = setInterval(() => {
+      const url = blobCache.get(meme.path);
+      if (url) {
+        setBlobUrl(url);
+        clearInterval(interval);
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, [blobUrl, blobCache, meme.path]);
+
+  const handleMouseEnter = () => {
+    setHovered(true);
+    if (meme.isVideo && videoRef.current) {
+      videoRef.current.currentTime = 0;
+      videoRef.current.play().catch(() => {});
+    }
+  };
+
+  const handleMouseLeave = () => {
+    setHovered(false);
+    if (meme.isVideo && videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = 0;
+    }
+  };
 
   return (
     <div
@@ -130,12 +217,16 @@ function MemeCard({ meme, hovered, onLoad, onClick, onMouseEnter, onMouseLeave, 
         aspectRatio: "1",
       }}
       onClick={onClick}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
     >
-      {!loaded ? (
+      {!blobUrl ? (
         <div className="w-full h-full flex flex-col items-center justify-center gap-2" style={{ background: "var(--bg-card)" }}>
-          <Icons.Refresh size={20} className="animate-spin" style={{ color: "var(--text-muted)" }} />
+          {meme.isAudio ? (
+            <Icons.Music size={20} style={{ color: "var(--accent-purple)" }} />
+          ) : (
+            <Icons.Refresh size={20} className="animate-spin" style={{ color: "var(--text-muted)" }} />
+          )}
           <p className="text-xs font-bold px-2 text-center truncate w-full" style={{ color: "var(--text-muted)" }}>
             {meme.name}
           </p>
@@ -149,23 +240,21 @@ function MemeCard({ meme, hovered, onLoad, onClick, onMouseEnter, onMouseLeave, 
         </div>
       ) : meme.isVideo ? (
         <video
-          ref={(el) => {
-            if (el) videoPreviewRefs.current.set(meme.path, el);
-            else videoPreviewRefs.current.delete(meme.path);
-          }}
-          src={meme.dataUrl}
+          ref={videoRef}
+          src={blobUrl}
           muted
           loop
           playsInline
-          preload="auto"
+          preload="metadata"
           className="w-full h-full object-cover"
           onLoadedData={(e) => { e.currentTarget.currentTime = 0.1; }}
         />
       ) : (
         <img
-          src={meme.dataUrl}
+          src={blobUrl}
           alt={meme.name}
           className="w-full h-full object-cover"
+          loading="lazy"
         />
       )}
 
@@ -203,7 +292,7 @@ function MemeCard({ meme, hovered, onLoad, onClick, onMouseEnter, onMouseLeave, 
       </div>
     </div>
   );
-}
+});
 
 interface MemesTabProps {
   t: (key: any) => string;
@@ -215,12 +304,17 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
   const [folderPath, setFolderPath] = useState<string | null>(() => localStorage.getItem("memesFolder"));
   const [memes, setMemes] = useState<MemeFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [hoveredMeme, setHoveredMeme] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [autoSave, setAutoSave] = useState(() => localStorage.getItem("memesAutoSave") === "true");
   const [searchQuery, setSearchQuery] = useState("");
   const [filter, setFilter] = useState<"all" | MediaCategory>("all");
-  const videoPreviewRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const blobCacheRef = useRef(new BlobUrlCache(BLOB_CACHE_MAX));
+
+  // Clean up all blob URLs on unmount
+  useEffect(() => {
+    const cache = blobCacheRef.current;
+    return () => cache.clear();
+  }, []);
 
   const loadMemes = useCallback(async () => {
     if (!folderPath) return;
@@ -244,7 +338,6 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
           isVideo: isVideoFile(e.name),
           isAudio: isAudioFile(e.name),
           category: getCategory(e.name),
-          dataUrl: "",
         }));
 
       setMemes(mediaFiles);
@@ -254,16 +347,35 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
     setLoading(false);
   }, [folderPath]);
 
-  // Lazy-load a single meme's data when it becomes visible
+  // Load a single meme's binary and store as Blob URL in cache
   const loadMemeData = useCallback(async (meme: MemeFile) => {
+    if (blobCacheRef.current.has(meme.path)) return;
     try {
       const bytes = await readFile(meme.path);
-      const base64 = uint8ToBase64(new Uint8Array(bytes));
       const mime = getMimeType(meme.name);
-      const dataUrl = `data:${mime};base64,${base64}`;
-      setMemes((prev) => prev.map((m) => m.path === meme.path ? { ...m, dataUrl } : m));
+      const blob = new Blob([new Uint8Array(bytes)], { type: mime });
+      const url = URL.createObjectURL(blob);
+      blobCacheRef.current.set(meme.path, url);
     } catch (err) {
       console.error("Failed to load meme data:", meme.name, err);
+    }
+  }, []);
+
+  // Get a data URL for selection (needed by the editor) — only called on click
+  const getDataUrlForMeme = useCallback(async (meme: MemeFile): Promise<string | null> => {
+    try {
+      const bytes = await readFile(meme.path);
+      const mime = getMimeType(meme.name);
+      const u8 = new Uint8Array(bytes);
+      // Chunked base64 encoding to avoid OOM
+      const CHUNK = 0x8000;
+      const parts: string[] = [];
+      for (let i = 0; i < u8.length; i += CHUNK) {
+        parts.push(String.fromCharCode(...u8.subarray(i, i + CHUNK)));
+      }
+      return `data:${mime};base64,${btoa(parts.join(""))}`;
+    } catch {
+      return null;
     }
   }, []);
 
@@ -311,6 +423,7 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
   const handleDelete = async (meme: MemeFile) => {
     try {
       await remove(meme.path);
+      blobCacheRef.current.delete(meme.path);
       onStatus(t("memes.deleted"));
       loadMemes();
     } catch (err) {
@@ -324,28 +437,6 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
       await openPath(folderPath);
     } catch (err) {
       console.error("Failed to open folder:", err);
-    }
-  };
-
-  const handleMouseEnter = (meme: MemeFile) => {
-    setHoveredMeme(meme.path);
-    if (meme.isVideo) {
-      const video = videoPreviewRefs.current.get(meme.path);
-      if (video) {
-        video.currentTime = 0;
-        video.play().catch(() => {});
-      }
-    }
-  };
-
-  const handleMouseLeave = (meme: MemeFile) => {
-    setHoveredMeme(null);
-    if (meme.isVideo) {
-      const video = videoPreviewRefs.current.get(meme.path);
-      if (video) {
-        video.pause();
-        video.currentTime = 0;
-      }
     }
   };
 
@@ -372,6 +463,10 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
       </div>
     );
   }
+
+  const filtered = memes
+    .filter((m) => filter === "all" || m.category === filter)
+    .filter((m) => !searchQuery || m.name.toLowerCase().includes(searchQuery.toLowerCase()));
 
   return (
     <div
@@ -481,11 +576,7 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
       </div>
 
       {/* Grid */}
-      {(() => {
-        const filtered = memes
-          .filter((m) => filter === "all" || m.category === filter)
-          .filter((m) => !searchQuery || m.name.toLowerCase().includes(searchQuery.toLowerCase()));
-        return loading ? (
+      {loading ? (
         <div className="flex-1 flex items-center justify-center">
           <Icons.Refresh size={32} className="animate-spin text-[var(--accent-orange)]" />
         </div>
@@ -506,22 +597,19 @@ export default function MemesTab({ t, onStatus, onSelectMeme }: MemesTabProps) {
               <MemeCard
                 key={meme.path}
                 meme={meme}
-                hovered={hoveredMeme === meme.path}
-                onLoad={loadMemeData}
-                onClick={() => {
-                  if (meme.dataUrl) onSelectMeme(meme.dataUrl, getMimeType(meme.name), meme.isAudio ? "audio" : meme.isVideo ? "video" : "image");
+                blobCache={blobCacheRef.current}
+                onRequestLoad={loadMemeData}
+                onClick={async () => {
+                  const dataUrl = await getDataUrlForMeme(meme);
+                  if (dataUrl) onSelectMeme(dataUrl, getMimeType(meme.name), meme.isAudio ? "audio" : meme.isVideo ? "video" : "image");
                 }}
-                onMouseEnter={() => handleMouseEnter(meme)}
-                onMouseLeave={() => handleMouseLeave(meme)}
                 onDelete={() => handleDelete(meme)}
-                videoPreviewRefs={videoPreviewRefs}
                 t={t}
               />
             ))}
           </div>
         </div>
-      );
-      })()}
+      )}
     </div>
   );
 }
