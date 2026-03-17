@@ -1,11 +1,11 @@
 {
-  "version": "0.3.0",
-  "notes": "0.3.0",
-  "pub_date": "2026-03-08T00:00:00Z",
+  "version": "0.3.1",
+  "notes": "Performance overhaul — drastically reduced memory usage",
+  "pub_date": "2026-03-17T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa3ZrQTNtOCtURVEwK0RwZ0tNd1cxNk1DTGFkbFJ4TWdpSzBOKzByTGcySDBZUWQ0VFhKekplRlNKWGpIajBMN3FMa3d4aWh6SU4vZzJoeitSWVFHYTY3bk90K2oxbWdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzczMDcwNzcyCWZpbGU6U2hpdHBvc3RfMC4zLjBfeDY0LXNldHVwLmV4ZQo4L0VxUkRLSnp1aCthcGtSQ3pGRTYyZW5zMTk3dWRIWW9RZWozeldsVFdJajVtOVZzZGh0d0lKWGxtY0pUMzM0UzVnZlAwbkdjN29KZ2RkNGd5d1JBQT09Cg==",
-      "url": "https://github.com/Cryserrrrr/Shitpost/releases/download/0.3.0/Shitpost_0.3.0_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa3ZrQTNtOCtURVk4MjZzd0U5V2EwajIweWtBYS9aRkFuWkhNcFlkcVpxUE9BMzBQSWxFMkFwMU93Q0oxVXNYWkd1eXNlVE9OWnAwMHNDZzg1eGR6RnA0RUhwdTdRUndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzczNzA4MjMxCWZpbGU6U2hpdHBvc3RfMC4zLjFfeDY0LXNldHVwLmV4ZQpQYms4NCtFMS85S0U0bHVXMnFxUXFUV0c1eERKWDdIRUdML3lLdFpDRXFCRkNLTFlUZVpOMHJadXVaZ3ZaMW1jdTZ6VFc4RFRudTBhUm5GNUMxcVRDZz09Cg==",
+      "url": "https://github.com/Cryserrrrr/Shitpost/releases/download/v0.3.1/Shitpost_0.3.1_x64-setup.exe"
     }
   }
 }
