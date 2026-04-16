@@ -52,6 +52,10 @@ function Overlay() {
       URL.revokeObjectURL(mediaBlobUrlRef.current);
       mediaBlobUrlRef.current = null;
     }
+    if (mediaUrlRef.current) {
+      URL.revokeObjectURL(mediaUrlRef.current);
+      mediaUrlRef.current = null;
+    }
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = "";
@@ -116,6 +120,23 @@ function Overlay() {
           } catch (err) {
             console.error("Auto-save received meme failed:", err);
           }
+        }
+      }
+
+      // Create blob URL synchronously BEFORE setting media to avoid src change on re-render
+      if (mediaUrlRef.current) {
+        URL.revokeObjectURL(mediaUrlRef.current);
+        mediaUrlRef.current = null;
+      }
+      if (data.mediaBuffer) {
+        try {
+          const binary = atob(data.mediaBuffer);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          const blob = new Blob([bytes], { type: data.mimeType });
+          mediaUrlRef.current = URL.createObjectURL(blob);
+        } catch {
+          // fallback to data URL handled below
         }
       }
 
@@ -338,33 +359,9 @@ function Overlay() {
     }
   };
 
-  // Convert base64 media to Blob URL for efficient memory usage
+  // Blob URL is created synchronously in showMedia before setMedia,
+  // so it's ready on the first render and the video src never changes mid-playback.
   const mediaUrlRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!media?.mediaBuffer) {
-      if (mediaUrlRef.current) {
-        URL.revokeObjectURL(mediaUrlRef.current);
-        mediaUrlRef.current = null;
-      }
-      return;
-    }
-    try {
-      const binary = atob(media.mediaBuffer);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const blob = new Blob([bytes], { type: media.mimeType });
-      const url = URL.createObjectURL(blob);
-      mediaUrlRef.current = url;
-    } catch {
-      // fallback handled below
-    }
-    return () => {
-      if (mediaUrlRef.current) {
-        URL.revokeObjectURL(mediaUrlRef.current);
-        mediaUrlRef.current = null;
-      }
-    };
-  }, [media?.mediaBuffer, media?.mimeType]);
 
   if (!media || animState === "hidden") return null;
 
