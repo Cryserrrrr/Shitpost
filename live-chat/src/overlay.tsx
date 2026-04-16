@@ -39,6 +39,10 @@ function Overlay() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioSrcNodeRef = useRef<AudioBufferSourceNode | null>(null);
 
+  // Media queue: pending items wait for the current one to finish
+  const queueRef = useRef<MediaData[]>([]);
+  const isPlayingRef = useRef(false);
+
   const cleanup = useCallback(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     if (exitTimeoutRef.current) clearTimeout(exitTimeoutRef.current);
@@ -75,16 +79,27 @@ function Overlay() {
     }
   }, []);
 
+  // Ref to hold showMedia so clearMedia can call it without circular dependency
+  const showMediaRef = useRef<(data: MediaData) => Promise<void>>();
+
   const clearMedia = useCallback(() => {
     cleanup();
+    isPlayingRef.current = false;
     setMedia(null);
     setAnimState("hidden");
+
+    // Play next item in queue if any
+    const next = queueRef.current.shift();
+    if (next && showMediaRef.current) {
+      showMediaRef.current(next);
+    }
   }, [cleanup]);
 
   const showMedia = useCallback(
     async (data: MediaData) => {
       // Clear any existing display
       cleanup();
+      isPlayingRef.current = true;
 
       // Save to history + auto-save to memes folder (skip if sent to self)
       const myUsername = localStorage.getItem("username");
@@ -232,6 +247,22 @@ function Overlay() {
     [cleanup, clearMedia]
   );
 
+  // Keep ref in sync so clearMedia can call showMedia
+  showMediaRef.current = showMedia;
+
+  // Enqueue or play immediately
+  const enqueueMedia = useCallback(
+    (data: MediaData) => {
+      if (isPlayingRef.current) {
+        queueRef.current.push(data);
+        if (import.meta.env.DEV) console.log(`[QUEUE] Media queued (${queueRef.current.length} in queue)`);
+      } else {
+        showMedia(data);
+      }
+    },
+    [showMedia]
+  );
+
   // Connect socket helper
   const connectSocket = useCallback((token: string) => {
     // Disconnect existing socket if any
@@ -275,11 +306,11 @@ function Overlay() {
 
     newSocket.on("media:show", (data: MediaData) => {
       if (import.meta.env.DEV) console.log(`Shitpost received from ${data.senderName || "unknown"}!`);
-      showMedia(data);
+      enqueueMedia(data);
     });
 
     socketRef.current = newSocket;
-  }, [showMedia]);
+  }, [enqueueMedia]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");

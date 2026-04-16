@@ -1,11 +1,11 @@
 {
-  "version": "0.3.1",
-  "notes": "Performance overhaul — drastically reduced memory usage",
-  "pub_date": "2026-03-17T00:00:00Z",
+  "version": "0.3.3",
+  "notes": "Media queue, cancel compression, pre-compress videos",
+  "pub_date": "2026-04-16T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa3ZrQTNtOCtURVk4MjZzd0U5V2EwajIweWtBYS9aRkFuWkhNcFlkcVpxUE9BMzBQSWxFMkFwMU93Q0oxVXNYWkd1eXNlVE9OWnAwMHNDZzg1eGR6RnA0RUhwdTdRUndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzczNzA4MjMxCWZpbGU6U2hpdHBvc3RfMC4zLjFfeDY0LXNldHVwLmV4ZQpQYms4NCtFMS85S0U0bHVXMnFxUXFUV0c1eERKWDdIRUdML3lLdFpDRXFCRkNLTFlUZVpOMHJadXVaZ3ZaMW1jdTZ6VFc4RFRudTBhUm5GNUMxcVRDZz09Cg==",
-      "url": "https://github.com/Cryserrrrr/Shitpost/releases/download/v0.3.1/Shitpost_0.3.1_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa3ZrQTNtOCtURVhnNERpU2JKTDRlUkVyRmhiVGllWUszcmgvTk4zUUNxbnVEczNOVlNUMk96SHhFc2E3TTl2NXVjQWNNNmRoYVg1MFBoRDV2MlFtWjB5aVNodUFHb0E0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc2MzUzOTM3CWZpbGU6U2hpdHBvc3RfMC4zLjNfeDY0LXNldHVwLmV4ZQpxSnZkOUJsTDlidlhyYW93N1Q0QmE4RFQ4cllBckdGd0tjSFJ0NTJ5TVN2N08vL05kblk4dzhXVFNVSEVqcHBEeENQOUF1MXE2KzZ4NHdtbUI2aFVEUT09Cg==",
+      "url": "https://github.com/Cryserrrrr/Shitpost/releases/download/v0.3.3/Shitpost_0.3.3_x64-setup.exe"
     }
   }
 }

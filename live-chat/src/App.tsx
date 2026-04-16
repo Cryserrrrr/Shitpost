@@ -105,6 +105,8 @@ function MainChat() {
   const [selectedMonitor, setSelectedMonitor] = useState(0);
   const [compressing, setCompressing] = useState(false);
   const [compressProgress, setCompressProgress] = useState(0);
+  const compressAbortRef = useRef(false);
+  const [precompressedBuffer, setPrecompressedBuffer] = useState<string | null>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const [segments, setSegments] = useState<{ start: number; end: number }[]>([]);
   const [activeSegment, setActiveSegment] = useState(0);
@@ -807,6 +809,14 @@ function MainChat() {
             video.onseeked = null;
             video.play().then(() => {
               const drawFrame = () => {
+                if (compressAbortRef.current) {
+                  video.pause();
+                  recorder.stop();
+                  cleanup();
+                  audioCtx?.close().catch(() => {});
+                  reject(new Error("Compression cancelled"));
+                  return;
+                }
                 if (video.paused || video.ended || video.currentTime >= seg.end) {
                   ctx.drawImage(video, 0, 0, w, h);
                   video.pause();
@@ -831,7 +841,7 @@ function MainChat() {
 
       video.onerror = () => { cleanup(); reject(new Error("Video load error")); };
     });
-  }, []);
+  }, [compressAbortRef]);
 
   const trimAudio = useCallback(async (dataUrl: string, segs: { start: number; end: number }[]): Promise<string> => {
     // Convert data URL to ArrayBuffer directly (fetch on data URLs can fail in WebView2)
@@ -909,22 +919,35 @@ function MainChat() {
     let mimeType = mediaData.mimeType;
 
     if (mediaData.type === "video") {
-      // Compress video before sending — repeat segments for loop
-      const loopedSegments: { start: number; end: number }[] = [];
-      for (let l = 0; l < loopCount; l++) loopedSegments.push(...segments);
-      setCompressing(true);
-      setCompressProgress(0);
-      try {
-        const compressed = await compressVideo(mediaData.data, loopedSegments, videoMuteOriginal);
-        mediaBuffer = compressed.split(",")[1];
+      if (precompressedBuffer) {
+        // Use pre-compressed data
+        mediaBuffer = precompressedBuffer;
         mimeType = "video/webm";
-      } catch (err) {
-        console.error("Video compression failed:", err);
-        setSendStatus(t("media.compress_error"));
+      } else {
+        // Compress video before sending — repeat segments for loop
+        const loopedSegments: { start: number; end: number }[] = [];
+        for (let l = 0; l < loopCount; l++) loopedSegments.push(...segments);
+        setCompressing(true);
+        setCompressProgress(0);
+        compressAbortRef.current = false;
+        try {
+          const compressed = await compressVideo(mediaData.data, loopedSegments, videoMuteOriginal);
+          if (compressAbortRef.current) {
+            setCompressing(false);
+            return;
+          }
+          mediaBuffer = compressed.split(",")[1];
+          mimeType = "video/webm";
+        } catch (err) {
+          console.error("Video compression failed:", err);
+          if (!compressAbortRef.current) {
+            setSendStatus(t("media.compress_error"));
+          }
+          setCompressing(false);
+          return;
+        }
         setCompressing(false);
-        return;
       }
-      setCompressing(false);
     } else if (mediaData.type === "audio") {
       // Trim audio before sending — repeat segments for loop
       const loopedAudioSegs: { start: number; end: number }[] = [];
@@ -1008,9 +1031,39 @@ function MainChat() {
     } catch (err) {
       console.error("Auto-save to memes folder failed:", err);
     }
-  }, [selectedTargets, mediaData, textData, timeoutMs, audioData, audioTrimStart, audioTrimEnd, createPreview, compressVideo, trimAudio, segments, loopCount, videoMuteOriginal]);
+  }, [selectedTargets, mediaData, textData, timeoutMs, audioData, audioTrimStart, audioTrimEnd, createPreview, compressVideo, trimAudio, segments, loopCount, videoMuteOriginal, precompressedBuffer]);
 
   // Shared handler for selecting a meme from library/history into the editor
+  // Invalidate precompressed data when video parameters change
+  useEffect(() => {
+    setPrecompressedBuffer(null);
+  }, [mediaData, segments, loopCount, videoMuteOriginal]);
+
+  const handleCancelCompress = useCallback(() => {
+    compressAbortRef.current = true;
+  }, []);
+
+  const handlePrecompress = useCallback(async () => {
+    if (!mediaData || mediaData.type !== "video") return;
+    const loopedSegments: { start: number; end: number }[] = [];
+    for (let l = 0; l < loopCount; l++) loopedSegments.push(...segments);
+    setCompressing(true);
+    setCompressProgress(0);
+    compressAbortRef.current = false;
+    try {
+      const compressed = await compressVideo(mediaData.data, loopedSegments, videoMuteOriginal);
+      if (!compressAbortRef.current) {
+        setPrecompressedBuffer(compressed.split(",")[1]);
+      }
+    } catch (err) {
+      if (!compressAbortRef.current) {
+        console.error("Pre-compression failed:", err);
+        setSendStatus(t("media.compress_error"));
+      }
+    }
+    setCompressing(false);
+  }, [mediaData, segments, loopCount, videoMuteOriginal, compressVideo, t]);
+
   const handleSelectMemeForEditor = useCallback((dataUrl: string, mimeType: string, mediaType: "image" | "video" | "audio") => {
     setMediaData({ type: mediaType, data: dataUrl, mimeType });
     setAudioData(null);
@@ -2835,27 +2888,74 @@ function MainChat() {
                   </div>
                 )}
 
+                {/* Pre-compress button (video only, not yet compressed) */}
+                {mediaData?.type === "video" && !precompressedBuffer && !compressing && (
+                  <button
+                    onClick={handlePrecompress}
+                    disabled={!mediaData}
+                    className="cartoon-btn w-full py-2 text-xs flex items-center justify-center gap-2"
+                    style={{
+                      background: "linear-gradient(135deg, var(--accent-cyan), var(--accent-purple))",
+                      color: "#fff",
+                    }}
+                  >
+                    <Icons.Zap size={14} />
+                    {t("media.precompress")}
+                  </button>
+                )}
+
+                {/* Compressing — show progress + cancel */}
+                {compressing && (
+                  <div className="flex gap-2 w-full mt-auto">
+                    <button
+                      disabled
+                      className="cartoon-btn flex-1 py-3 text-sm flex items-center justify-center gap-2"
+                      style={{
+                        background: "linear-gradient(135deg, var(--accent-cyan), var(--accent-purple))",
+                        color: "#fff",
+                      }}
+                    >
+                      {t("media.compress")} {compressProgress}%
+                    </button>
+                    <button
+                      onClick={handleCancelCompress}
+                      className="cartoon-btn py-3 px-3 text-sm flex items-center justify-center"
+                      style={{
+                        background: "linear-gradient(135deg, #ef4444, #dc2626)",
+                        color: "#fff",
+                      }}
+                    >
+                      <Icons.Close size={16} />
+                    </button>
+                  </div>
+                )}
+
                 {/* Send */}
-                <button
-                  onClick={handleSend}
-                  disabled={selectedTargets.length === 0 || !mediaData || compressing}
-                  className="cartoon-btn w-full py-3 text-sm flex items-center justify-center gap-2 mt-auto"
-                  style={{
-                    background: compressing
-                      ? "linear-gradient(135deg, var(--accent-cyan), var(--accent-purple))"
-                      : "linear-gradient(135deg, var(--accent-pink), var(--accent-orange))",
-                    color: "#fff",
-                  }}
-                >
-                  {compressing ? (
-                    <>{t("media.compress")} {compressProgress}%</>
-                  ) : (
-                    <>
-                      <Icons.Send size={16} />
-                      {t("media.send")} ({selectedTargets.length})
-                    </>
-                  )}
-                </button>
+                {!compressing && (
+                  <button
+                    onClick={handleSend}
+                    disabled={selectedTargets.length === 0 || !mediaData}
+                    className="cartoon-btn w-full py-3 text-sm flex items-center justify-center gap-2 mt-auto"
+                    style={{
+                      background: precompressedBuffer
+                        ? "linear-gradient(135deg, var(--accent-green, #22c55e), var(--accent-cyan))"
+                        : "linear-gradient(135deg, var(--accent-pink), var(--accent-orange))",
+                      color: "#fff",
+                    }}
+                  >
+                    {precompressedBuffer ? (
+                      <>
+                        <Icons.Zap size={16} />
+                        {t("media.send_ready")} ({selectedTargets.length})
+                      </>
+                    ) : (
+                      <>
+                        <Icons.Send size={16} />
+                        {t("media.send")} ({selectedTargets.length})
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
             </div>
           )}
